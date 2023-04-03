@@ -113,7 +113,7 @@ async fn main() -> io::Result<()> {
         .window_size((400.0, 250.0));
 
     tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
         loop {
             let (socket, _) = listener.accept().await.unwrap();
             if let Err(res) = process_incoming(socket).await {
