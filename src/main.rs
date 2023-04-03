@@ -1,11 +1,13 @@
 // #![windows_subsystem = "windows"]
 
+use std::{env, thread};
 /*
 GUI Windows-compatible application written in Rust with druid.
 Application has functionality to choose a file and send it over network to another computer.
 */
 use std::fs::File;
 use std::io::Read;
+use std::str;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncWriteExt, self, BufReader, AsyncReadExt};
 use tokio::net::{TcpStream, TcpListener};
@@ -61,6 +63,8 @@ impl GuiState {
             buf.extend_from_slice(&data_type);
             buf.extend_from_slice(&file_name_size);
             buf.extend_from_slice(&file_size_buf);
+            println!("Sending buf: {:?}", buf);
+
             stream.write_all(&buf).await.unwrap();
 
             let mut buf = [0; 1024];
@@ -104,23 +108,18 @@ impl AppDelegate<GuiState> for Delegate {
     }
 }
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
     let gui_state = GuiState::new();
 
     let window = WindowDesc::new(build_gui())
         .title("File Transfer")
         .window_size((400.0, 250.0));
 
-    tokio::spawn(async move {
-        let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
-        loop {
-            let (socket, _) = listener.accept().await.unwrap();
-            if let Err(res) = process_incoming(socket).await {
-                println!("Error: {}", res);
-            }
-        }
-        
+    let port = args[1].clone();
+    thread::spawn(|| {
+        start_tokio(port);
     });
 
     AppLauncher::with_window(window)
@@ -128,27 +127,38 @@ async fn main() -> io::Result<()> {
         .log_to_console()
         .launch(gui_state)
         .expect("Failed to launch application");
+}
 
-    Ok(())
+#[tokio::main]
+async fn start_tokio(port: String) {
+    let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port)).await.unwrap();
+    loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        if let Err(error) = process_incoming(socket).await {
+            println!("Error: {}", error);
+        }
+    }
 }
 
 async fn process_incoming(socket: TcpStream) -> io::Result<()> {
     let mut reader = BufReader::new(socket);
-    let mut data_type = [0u8; 1];
-    let mut file_name_size = [0u8; 2];
-    let mut file_size = [0u8; 8];
 
-    reader.read_exact(&mut data_type).await?;
-    reader.read_exact(&mut file_name_size).await?;
-    reader.read_exact(&mut file_size).await?;
+    let data_type = reader.read_u8().await?;
+    println!("data_type: {:?}", data_type);
 
-    let file_name_size = u16::from_be_bytes(file_name_size);
-    let file_size = u64::from_be_bytes(file_size);
+    let file_name_size = reader.read_u16().await?;
+    println!("file_name_size: {:?}", file_name_size);
+
+    let file_size = reader.read_u64().await?;
+    println!("file_size: {:?}", file_size);
+
+    // let file_name_size = u16::from_be_bytes(file_name_size);
+    // let file_size = u64::from_be_bytes(file_size);
 
     let mut file_name_buffer = vec![0u8; file_name_size as usize];
     reader.read_exact(&mut file_name_buffer).await?;
     if let Ok(file_name) = String::from_utf8(file_name_buffer) {
-        match data_type[0] {
+        match data_type {
             0x01 => {
                 println!("Received file: {} ({} bytes)", file_name, file_size);
                 // Handle file transfer
@@ -158,15 +168,12 @@ async fn process_incoming(socket: TcpStream) -> io::Result<()> {
                 // Handle text transfer
             },
             _ => {
-                println!("Unknown data type: {}", data_type[0]);
+                println!("Unknown data type: {}", data_type);
             },
         }
     }
 
-    // Process data based on data type
-
     Ok(())
-    // println!("File transfer complete: {}", file_name_clone);
 }
 
 fn build_gui() -> impl Widget<GuiState> {
