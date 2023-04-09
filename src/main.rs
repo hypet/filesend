@@ -207,9 +207,10 @@ fn build_gui() -> impl Widget<GuiState> {
         .fix_width(300.0)
         .lens(GuiState::file_name.clone());
     let open_dialog_options = FileDialogOptions::new()
-        .allowed_types(vec![FileSpec::new("All Files", &["*.*"])])
-        .name_label("File to send")
-        .title("Choose a file to send")
+        .select_directories()
+        .multi_selection()
+        .name_label("Files or dirs to send")
+        .title("Files or dirs to send")
         .button_text("Open");
     let open = Button::new("Open")
         .on_click(move |ctx, _, _| {
