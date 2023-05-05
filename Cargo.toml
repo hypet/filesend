@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 druid = "0.8.0"
+walkdir = "2"
+rand = "0.8.5"
