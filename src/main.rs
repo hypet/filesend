@@ -10,7 +10,7 @@ use tokio::net::{TcpListener};
 
 use druid::widget::{Button, Container, Flex, Label, ProgressBar, TextBox};
 use druid::{ commands,
-    AppLauncher, AppDelegate, Command, DelegateCtx, Data, Env, FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, ExtEventSink, Selector,
+    AppLauncher, AppDelegate, Command, DelegateCtx, Data, Env, FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, ExtEventSink,
 };
 
 use tokio::runtime::{Runtime, Builder};
@@ -99,6 +99,7 @@ fn build_gui() -> impl Widget<GuiState> {
 
     let send_button = Button::new("Send")
         .on_click(|ctx, data: &mut GuiState, _| send(data, ctx.get_external_handle()))
+        .disabled_if(|data: &GuiState, _| data.file_name.is_empty() || (data.progress > 0.00 && data.progress < 1.0))
         .fix_height(30.0);
 
     let incoming_filename_label =
@@ -135,7 +136,6 @@ fn main() {
     let window = WindowDesc::new(build_gui())
         .title("File Transfer")
         .window_size((400.0, 250.0));
-
 
     let launcher = AppLauncher::with_window(window);
 

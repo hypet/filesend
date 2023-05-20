@@ -1,9 +1,8 @@
+use std::borrow::Cow;
 use std::fs::{File, self};
 use std::io::{Write, Read};
 use std::path::{Path, PathBuf};
 use std::thread;
-
-use rand::Rng;
 
 use druid::{ExtEventSink, Selector, Target};
 use tokio::io::{AsyncWriteExt, self, AsyncReadExt};
@@ -154,25 +153,23 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
 
     let path_parent = path.parent().unwrap();
     if path.is_dir() {
-        let dir_root = path.file_name().unwrap();
-
         for entry in WalkDir::new(path) {
             let entry = entry.unwrap();
             let entry_path: &Path = entry.path().strip_prefix(path_parent).unwrap();
             if entry.path().is_dir() {
                 println!("> Sending dir: entry_path: {}", entry_path.to_str().unwrap());
-                send_single_dir(&mut stream, entry_path.to_str().unwrap()).await;
+                send_single_dir(&mut stream, entry_path.to_path_buf()).await;
             } else {
                 let entry_full_path = entry.path().to_str().unwrap();
                 let mut full_path = PathBuf::from(path.clone());
                 full_path.push(entry.path().file_name().unwrap().to_str().unwrap());
-                send_single_file(&mut stream, entry_full_path, entry_path.to_str().unwrap(), sink.clone()).await;
+                send_single_file(&mut stream, entry_full_path, entry_path.to_path_buf(), sink.clone()).await;
             }
         }
         stream.write_u8(0x00).await;
     } else {
         let entry_path = path.strip_prefix(path_parent).unwrap();
-        send_single_file(&mut stream, path.to_str().unwrap(), entry_path.to_str().unwrap(), sink).await;
+        send_single_file(&mut stream, path.to_str().unwrap(), entry_path.to_path_buf(), sink).await;
     }
 
     stream.write_u8(0).await;
@@ -187,8 +184,9 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
     }
 }
 
-async fn send_single_dir(stream: &mut TcpStream, dir_name: &str) -> io::Result<()> {
-    let dir_name_buffer = dir_name.as_bytes();
+async fn send_single_dir(stream: &mut TcpStream, dir_path_buf: PathBuf) -> io::Result<()> {
+    let encoded_dir: Cow<str> = paths_as_strings::encode_path(&dir_path_buf);
+    let dir_name_buffer = encoded_dir.as_bytes();
     let dir_name_size = dir_name_buffer.len() as u16;
     
     stream.write_u8(0x02).await?;
@@ -203,8 +201,8 @@ async fn send_single_dir(stream: &mut TcpStream, dir_name: &str) -> io::Result<(
     Ok(())
 }
 
-async fn send_single_file(stream: &mut TcpStream, file_name: &str, relative_path: &str, sink: ExtEventSink) -> io::Result<()> {
-    println!("> Sending file: {}, relative_path: {}", file_name, relative_path);
+async fn send_single_file(stream: &mut TcpStream, file_name: &str, relative_path: PathBuf, sink: ExtEventSink) -> io::Result<()> {
+    println!("> Sending file: {}, relative_path: {:?}", file_name, relative_path);
 
     sink.submit_command(PROGRESSBAR_VAL_FN, 0.0, Target::Auto)
         .expect("command failed to submit");
@@ -214,7 +212,8 @@ async fn send_single_file(stream: &mut TcpStream, file_name: &str, relative_path
     let mut file = File::open(file_name).unwrap();
     let file_size = file.metadata().unwrap().len();
 
-    let file_name_buffer = relative_path.as_bytes();
+    let encoded_dir: Cow<str> = paths_as_strings::encode_path(&relative_path);
+    let file_name_buffer = encoded_dir.as_bytes();
     let file_name_size = file_name_buffer.len() as u16;
 
     stream.write_u8(0x01).await?;

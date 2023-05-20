@@ -9,4 +9,4 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 druid = "0.8.0"
 walkdir = "2"
-rand = "0.8.5"
+paths-as-strings = "0.1.1"
