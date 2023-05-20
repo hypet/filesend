@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fs::{File, self};
 use std::io::{Write, Read};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::thread;
 
 use druid::{ExtEventSink, Selector, Target};
@@ -120,8 +121,9 @@ async fn handle_dir(reader: &mut TcpStream) -> io::Result<()> {
     let mut dir_name_buffer = vec![0u8; dir_name_size as usize];
     reader.read_exact(&mut dir_name_buffer).await?;
     if let Ok(dir_name) = String::from_utf8(dir_name_buffer) {
-        println!("< Received dir: {}", dir_name);
-        fs::create_dir_all(&dir_name).unwrap();
+        let path_buf = PathBuf::from_str(&dir_name).unwrap();
+        println!("< Received dir: {}, {:?}", dir_name, path_buf);
+        fs::create_dir_all(path_buf.as_path()).unwrap();
     }
 
     Ok(())
