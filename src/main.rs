@@ -1,28 +1,30 @@
 // #![windows_subsystem = "windows"]
 
+use std::collections::HashMap;
 use std::{env, thread};
 /*
 GUI Windows-compatible application written in Rust with druid.
 Application has functionality to choose a file and send it over network to another computer.
 */
 use std::sync::{Arc, Mutex};
-use tokio::net::{TcpListener};
+use tokio::net::{TcpListener, TcpStream};
 
 use druid::widget::{Button, Container, Flex, Label, ProgressBar, TextBox};
-use druid::{ commands,
-    AppLauncher, AppDelegate, Command, DelegateCtx, Data, Env, FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, ExtEventSink,
+use druid::{
+    commands, AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, ExtEventSink,
+    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc,
 };
 
-use tokio::runtime::{Runtime, Builder};
+use tokio::runtime::{Builder, Runtime};
 
-use networking::TRANSMITTITNG_FILENAME_VAL_FN;
 use networking::process_incoming;
 use networking::send;
+use networking::TRANSMITTITNG_FILENAME_VAL_FN;
 
 mod networking;
 
 #[derive(Clone, Data, Lens)]
-struct GuiState {
+struct AppState {
     file_name: String,
     host: String,
     port: String,
@@ -30,11 +32,12 @@ struct GuiState {
     rt: Arc<Runtime>,
     incoming_file_name: String,
     incoming_file_size: Arc<Mutex<i64>>,
+    connections: Arc<Mutex<HashMap<String, TcpStream>>>,
 }
 
-impl GuiState {
-    fn new() -> GuiState {
-        GuiState {
+impl AppState {
+    fn new() -> AppState {
+        AppState {
             file_name: "".to_string(),
             host: "".into(),
             port: "".into(),
@@ -42,20 +45,20 @@ impl GuiState {
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
             incoming_file_size: Arc::new(Mutex::from(0)),
+            connections: Arc::new(Mutex::from(HashMap::new())),
         }
     }
 }
 
-
 struct Delegate;
 
-impl AppDelegate<GuiState> for Delegate {
+impl AppDelegate<AppState> for Delegate {
     fn command(
         &mut self,
         _ctx: &mut DelegateCtx,
         _target: Target,
         cmd: &Command,
-        data: &mut GuiState,
+        data: &mut AppState,
         _env: &Env,
     ) -> Handled {
         if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
@@ -67,46 +70,58 @@ impl AppDelegate<GuiState> for Delegate {
             return Handled::Yes;
         } else if let Some(number) = cmd.get(networking::PROGRESSBAR_VAL_FN) {
             data.progress = *number;
-            return Handled::Yes
+            return Handled::Yes;
         } else if let Some(file_name) = cmd.get(TRANSMITTITNG_FILENAME_VAL_FN) {
             data.incoming_file_name = (*file_name).clone();
-            return Handled::Yes
+            return Handled::Yes;
         }
 
         Handled::No
     }
 }
 
-fn build_gui() -> impl Widget<GuiState> {
+fn build_gui() -> impl Widget<AppState> {
     let file_name_textbox = TextBox::new()
         .with_placeholder("File Name")
         .with_text_size(18.0)
         .expand_width()
         .align_left()
-        .lens(GuiState::file_name.clone());
+        .lens(AppState::file_name.clone());
     let open_dialog_options = FileDialogOptions::new()
         .name_label("Files or dirs to send")
         .title("Files or dirs to send")
         .button_text("Open");
-    let open = Button::new("Open")
-        .on_click(move |ctx, _, _| {
-            ctx.submit_command(druid::commands::SHOW_OPEN_PANEL.with(open_dialog_options.clone()))
-        });
+    let open = Button::new("Open").on_click(move |ctx, _, _| {
+        ctx.submit_command(druid::commands::SHOW_OPEN_PANEL.with(open_dialog_options.clone()))
+    });
 
-    let host_textbox = TextBox::new().with_placeholder("Host").align_left().lens(GuiState::host);
+    let host_textbox = TextBox::new()
+        .with_placeholder("Host")
+        .align_left()
+        .lens(AppState::host);
 
-    let port_textbox = TextBox::new().with_placeholder("Port").align_left().lens(GuiState::port);
+    let port_textbox = TextBox::new()
+        .with_placeholder("Port")
+        .align_left()
+        .lens(AppState::port);
 
     let send_button = Button::new("Send")
-        .on_click(|ctx, data: &mut GuiState, _| send(data, ctx.get_external_handle()))
-        .disabled_if(|data: &GuiState, _| data.file_name.is_empty() || (data.progress > 0.00 && data.progress < 1.0))
+        .on_click(|ctx, data: &mut AppState, _| send(data, ctx.get_external_handle()))
+        .disabled_if(|data: &AppState, _| {
+            data.file_name.is_empty() || (data.progress > 0.00 && data.progress < 1.0)
+        })
         .fix_height(30.0);
 
     let incoming_filename_label =
-        Label::new(|data: &GuiState, _: &_| data.incoming_file_name.clone()).expand_width().center();
-    let progress_bar = ProgressBar::new().lens(GuiState::progress).expand_width().center();
+        Label::new(|data: &AppState, _: &_| data.incoming_file_name.clone())
+            .expand_width()
+            .center();
+    let progress_bar = ProgressBar::new()
+        .lens(AppState::progress)
+        .expand_width()
+        .center();
     let progress_label =
-        Label::new(|data: &GuiState, _: &_| format!("{:.2}%", data.progress * 100.0)).center();
+        Label::new(|data: &AppState, _: &_| format!("{:.2}%", data.progress * 100.0)).center();
 
     let address = Flex::row()
         .with_child(host_textbox)
@@ -131,7 +146,7 @@ fn build_gui() -> impl Widget<GuiState> {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let gui_state = GuiState::new();
+    let app_state = AppState::new();
 
     let window = WindowDesc::new(build_gui())
         .title("File Transfer")
@@ -148,16 +163,19 @@ fn main() {
     launcher
         .delegate(Delegate)
         .log_to_console()
-        .launch(gui_state)
+        .launch(app_state)
         .expect("Failed to launch application");
 }
 
 #[tokio::main]
 async fn start_tokio(sink: ExtEventSink, port: String) {
-    let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port)).await.unwrap();
+    let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
+        .await
+        .unwrap();
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
+        println!("Connected");
         if let Err(error) = process_incoming(sink_clone, &mut socket).await {
             println!("Error: {}", error);
         }

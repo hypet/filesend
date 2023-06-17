@@ -1,138 +1,190 @@
-use std::borrow::Cow;
-use std::fs::{File, self};
-use std::io::{Write, Read};
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::thread;
 
 use druid::{ExtEventSink, Selector, Target};
-use tokio::io::{AsyncWriteExt, self, AsyncReadExt};
-use tokio::net::{TcpStream};
+use msgpacker::prelude::*;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use walkdir::WalkDir;
 
-use crate::GuiState;
+use crate::AppState;
 
 pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_val_fn");
-pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> = Selector::new("transmitting_filename_val_fn");
+pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> =
+    Selector::new("transmitting_filename_val_fn");
 
+pub enum DataType {
+    FILE,
+    DIRECTORY,
+    TEXT_BUFFER,
+}
+
+impl DataType {
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            DataType::FILE => 0,
+            DataType::DIRECTORY => 1,
+            DataType::TEXT_BUFFER => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Option<DataType> {
+        match value {
+            0 => Some(DataType::FILE),
+            1 => Some(DataType::DIRECTORY),
+            2 => Some(DataType::TEXT_BUFFER),
+            _ => None,
+        }
+    }
+}
+
+#[derive(MsgPacker)]
+pub struct FileMeta {
+    pub file_relative_path: Vec<String>,
+    pub file_size: u64,
+}
+
+#[derive(MsgPacker)]
+pub struct TextMeta {
+    pub data: String,
+}
 
 //////// Receiving part
 
 pub(crate) async fn process_incoming(sink: ExtEventSink, socket: &mut TcpStream) -> io::Result<()> {
     loop {
-        let data_type = socket.read_u8().await?;
+        println!("process_incoming");
+        handle_msg_pack(socket, &sink).await?;
+    }
+}
 
-        match data_type {
-            0x00 => {
-                println!("< Transfer finished");
-                socket.write_u8(0x0).await?;
-                break; 
-            }
-            0x01 => {
-                handle_file(sink.clone(), socket).await?;
-            },
-            0x02 => {
-                handle_dir(socket).await?;
-            },
-            0x03 => {
-                let file_size = socket.read_u64().await?;
-                println!("< text_buf_size: {:?}", file_size);
-            },
-            _ => {
-                println!("< Unknown data type: {}", data_type);
-            },
+async fn handle_msg_pack(socket: &mut TcpStream, sink: &ExtEventSink) -> io::Result<()> {
+    let msg_size = socket.read_u64().await?;
+    let msg_type = socket.read_u8().await?;
+    println!("msg_size: {}, msg_type: {}", msg_size, msg_type);
+
+    match DataType::from_u8(msg_type) {
+        Some(DataType::FILE) => {
+            handle_file(sink.clone(), socket, msg_size).await?;
+        }
+        Some(DataType::DIRECTORY) => {
+            handle_dir(socket, msg_size).await?;
+        }
+        Some(DataType::TEXT_BUFFER) => {
+            handle_text_buf(socket, msg_size).await?;
+        }
+        None => {
+            eprintln!("< DataType is None");
         }
     }
-
     Ok(())
 }
 
-async fn handle_file(sink: ExtEventSink, reader: &mut TcpStream) -> io::Result<()> {
-    let file_name_size = reader.read_u16().await?;
-    let file_size = reader.read_u64().await?;
-    let mut file_name_buffer = vec![0u8; file_name_size as usize];
-    reader.read_exact(&mut file_name_buffer).await?;
+async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
+    println!("handling file");
+    let mut buf = vec![0u8; msg_size as usize];
+    socket.read_exact(&mut buf).await?;
+    let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
+    println!("Decoded {} bytes for msgPack", bytes);
 
-    if let Ok(file_name) = String::from_utf8(file_name_buffer) {
-        println!("< Receiving file: {} ({} bytes)", file_name, file_size);
-        sink.submit_command(TRANSMITTITNG_FILENAME_VAL_FN, file_name.to_string(), Target::Auto)
+    let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
+
+    println!("< Receiving file: {:?} ({} bytes)", relative_path, msg_file.file_size);
+    sink.submit_command(
+        TRANSMITTITNG_FILENAME_VAL_FN,
+        Box::new(String::from(relative_path.to_str().unwrap())),
+        Target::Auto,
+    )
+    .expect("command failed to submit");
+
+    let mut file = File::create(&relative_path).unwrap();
+    let mut total_received: u64 = 0;
+    const BUF_SIZE: usize = 1024;
+    let mut buf = [0u8; BUF_SIZE];
+    let file_size = msg_file.file_size;
+
+    if file_size < BUF_SIZE as u64 {
+        let mut buf = vec![0u8; file_size as usize];
+        let read_bytes = socket.read_exact(&mut buf).await?;
+        if read_bytes == 0 {
+            println!("< Can't read data");
+        }
+        total_received += read_bytes as u64;
+        file.write_all(&buf).unwrap();
+
+        sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto)
             .expect("command failed to submit");
-
-        let mut file = File::create(&file_name).unwrap();
-        let mut total_received: u64 = 0;
-        const BUF_SIZE: usize = 1024;
-        let mut buf = [0u8; BUF_SIZE];
-
-        if file_size < BUF_SIZE as u64 {
-            let mut buf = vec![0u8; file_size as usize];
-            let read_bytes = reader.read_exact(&mut buf).await?;
+    } else {
+        let mut counter: u8 = 0;
+        while total_received < file_size {
+            let read_bytes = socket.read_exact(&mut buf).await?;
             if read_bytes == 0 {
-                println!("< Can't read data");
+                eprintln!("< Can't read data");
+                break;
             }
             total_received += read_bytes as u64;
-            file.write_all(&buf).unwrap();
-        
-            sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto).expect("command failed to submit");
-        } else {
-            let mut counter: u8 = 0;
-            while total_received < file_size {
-                let read_bytes = reader.read_exact(&mut buf).await?;
-                if read_bytes == 0 {
-                    eprintln!("< Can't read data");
-                    break;
-                }
-                total_received += read_bytes as u64;
-                file.write_all(&buf)?;
+            file.write_all(&buf)?;
 
-                let bytes_left: i128 = file_size as i128 - total_received as i128;
-                if bytes_left > 0 && bytes_left < BUF_SIZE as i128 {
-                    let mut buf = vec![0u8; (file_size - total_received) as usize];
-                    let n = reader.read_exact(&mut buf).await?;
-                    file.write_all(&buf).unwrap();
-                    total_received += n as u64;
+            let bytes_left: i128 = file_size as i128 - total_received as i128;
+            if bytes_left > 0 && bytes_left < BUF_SIZE as i128 {
+                let mut buf = vec![0u8; (file_size - total_received) as usize];
+                let n = socket.read_exact(&mut buf).await?;
+                file.write_all(&buf).unwrap();
+                total_received += n as u64;
 
-                    sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto).expect("command failed to submit");
-                    break;
-                }
+                sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto)
+                    .expect("command failed to submit");
+                break;
+            }
 
-                counter += 1;
-                let percentage = total_received as f64 / file_size as f64;
-        
-                if counter % 100 == 0 {
-                    sink.submit_command(PROGRESSBAR_VAL_FN, percentage, Target::Auto)
-                        .expect("command failed to submit");
-                    counter = 0;
-                }
-        
+            counter += 1;
+            let percentage = total_received as f64 / file_size as f64;
+
+            if counter % 100 == 0 {
+                sink.submit_command(PROGRESSBAR_VAL_FN, percentage, Target::Auto)
+                    .expect("command failed to submit");
+                counter = 0;
             }
         }
-        println!("< Received {} bytes", total_received);
-    } else {
-        eprintln!("< Invalid file name");
     }
+    println!("< Received {} bytes", total_received);
 
     Ok(())
 }
 
-async fn handle_dir(reader: &mut TcpStream) -> io::Result<()> {
-    let dir_name_size = reader.read_u16().await?;
-    println!("< dir_name_size: {:?}", dir_name_size);
-    let mut dir_name_buffer = vec![0u8; dir_name_size as usize];
-    reader.read_exact(&mut dir_name_buffer).await?;
-    if let Ok(dir_name) = String::from_utf8(dir_name_buffer) {
-        let path_buf = PathBuf::from_str(&dir_name).unwrap();
-        println!("< Received dir: {}, {:?}", dir_name, path_buf);
-        fs::create_dir_all(path_buf.as_path()).unwrap();
-    }
+async fn handle_dir(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
+    println!("handling dir");
+    let mut buf = vec![0u8; msg_size as usize];
+    socket.read_exact(&mut buf).await?;
+    let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
+    println!("Decoded {} bytes for msgPack", bytes);
+
+    let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
+
+    println!("< Received dir: {:?}", relative_path);
+    fs::create_dir_all(relative_path.as_path()).unwrap();
 
     Ok(())
 }
 
+async fn handle_text_buf(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
+    println!("handling text_buf");
+    let mut buf = vec![0u8; msg_size as usize];
+    socket.read_exact(&mut buf).await?;
+    let (bytes, msg_text) = TextMeta::unpack(&buf).unwrap();
+    println!("Decoded {} bytes for msgPack", bytes);
+
+    println!("< Received text_buf: {:?}", msg_text.data);
+
+    Ok(())
+}
 
 //////// Sending part
 
-pub(crate) fn send(data: &mut GuiState, sink: ExtEventSink) {
+pub(crate) fn send(data: &mut AppState, sink: ExtEventSink) {
     let s = sink.clone();
     let path = data.file_name.clone();
     let host = data.host.clone();
@@ -142,6 +194,7 @@ pub(crate) fn send(data: &mut GuiState, sink: ExtEventSink) {
     thread::spawn(move || {
         rt.block_on(async move {
             send_file(path, host, port, s.clone()).await;
+            println!("Sender thread died");
         });
     });
 }
@@ -159,69 +212,98 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
             let entry = entry.unwrap();
             let entry_path: &Path = entry.path().strip_prefix(path_parent).unwrap();
             if entry.path().is_dir() {
-                println!("> Sending dir: entry_path: {}", entry_path.to_str().unwrap());
-                send_single_dir(&mut stream, entry_path.to_path_buf()).await;
+                println!(
+                    "> Sending dir: entry_path: {}",
+                    entry_path.to_str().unwrap()
+                );
+                match send_single_dir(&mut stream, entry_path.to_path_buf()).await {
+                    Ok(_) => {}
+                    Err(e) => println!("Error: {}", e),
+                }
             } else {
                 let entry_full_path = entry.path().to_str().unwrap();
                 let mut full_path = PathBuf::from(path.clone());
                 full_path.push(entry.path().file_name().unwrap().to_str().unwrap());
-                send_single_file(&mut stream, entry_full_path, entry_path.to_path_buf(), sink.clone()).await;
+                match send_single_file(
+                    &mut stream,
+                    entry_full_path,
+                    entry_path.to_path_buf(),
+                    sink.clone(),
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(e) => println!("Error: {}", e),
+                }
             }
         }
-        stream.write_u8(0x00).await;
     } else {
         let entry_path = path.strip_prefix(path_parent).unwrap();
-        send_single_file(&mut stream, path.to_str().unwrap(), entry_path.to_path_buf(), sink).await;
-    }
-
-    stream.write_u8(0).await;
-
-    while let Ok(finish) = stream.read_u8().await {
-        if finish == 0 {
-            println!("Transfer complete");
-            break;
-        } else {
-            println!("Received: {}", finish);
+        match send_single_file(
+            &mut stream,
+            path.to_str().unwrap(),
+            entry_path.to_path_buf(),
+            sink,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => println!("Error: {}", e),
         }
     }
 }
 
 async fn send_single_dir(stream: &mut TcpStream, dir_path_buf: PathBuf) -> io::Result<()> {
-    let encoded_dir: Cow<str> = paths_as_strings::encode_path(&dir_path_buf);
-    let dir_name_buffer = encoded_dir.as_bytes();
-    let dir_name_size = dir_name_buffer.len() as u16;
-    
-    stream.write_u8(0x02).await?;
-    stream.write_u16(dir_name_size).await?;
-    match stream.write_all(dir_name_buffer).await {
-        Ok(_) => {}
-        Err(e) => {
-            println!("> Error: {}", e);
-        }
-    }
+    let data = FileMeta {
+        file_relative_path: path_to_vec(dir_path_buf),
+        file_size: 0,
+    };
+
+    let mut buf = Vec::new();
+    let msg_size = data.pack(&mut buf);
+
+    stream.write_u64(msg_size as u64).await?;
+    stream.write_u8(DataType::DIRECTORY.to_u8()).await?;
+    stream.write(&buf).await?;
 
     Ok(())
 }
 
-async fn send_single_file(stream: &mut TcpStream, file_name: &str, relative_path: PathBuf, sink: ExtEventSink) -> io::Result<()> {
-    println!("> Sending file: {}, relative_path: {:?}", file_name, relative_path);
+async fn send_single_file(
+    stream: &mut TcpStream,
+    file_name: &str,
+    relative_path: PathBuf,
+    sink: ExtEventSink,
+) -> io::Result<()> {
+    println!(
+        "> Sending file: {}, relative_path: {:?}",
+        file_name, relative_path
+    );
 
     sink.submit_command(PROGRESSBAR_VAL_FN, 0.0, Target::Auto)
         .expect("command failed to submit");
-    sink.submit_command(TRANSMITTITNG_FILENAME_VAL_FN, file_name.to_string(), Target::Auto)
-        .expect("command failed to submit");
+    sink.submit_command(
+        TRANSMITTITNG_FILENAME_VAL_FN,
+        file_name.to_string(),
+        Target::Auto,
+    )
+    .expect("command failed to submit");
 
     let mut file = File::open(file_name).unwrap();
     let file_size = file.metadata().unwrap().len();
 
-    let encoded_dir: Cow<str> = paths_as_strings::encode_path(&relative_path);
-    let file_name_buffer = encoded_dir.as_bytes();
-    let file_name_size = file_name_buffer.len() as u16;
+    let data = FileMeta {
+        file_relative_path: path_to_vec(relative_path),
+        file_size: file_size,
+    };
 
-    stream.write_u8(0x01).await?;
-    stream.write_u16(file_name_size).await?;
-    stream.write_u64(file_size).await?;
-    stream.write_all(file_name_buffer).await?;
+    let mut buf = Vec::new();
+    let msg_size = data.pack(&mut buf);
+    println!("Packed msg size: {}", msg_size);
+
+    stream.write_u64(msg_size as u64).await?;
+    stream.write_u8(DataType::FILE.to_u8()).await?;
+    stream.write(&buf).await?;
 
     let mut buf = [0; 1024];
     let mut total_sent: u64 = 0;
@@ -248,7 +330,30 @@ async fn send_single_file(stream: &mut TcpStream, file_name: &str, relative_path
             counter = 0;
         }
     }
-    sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto).expect("command failed to submit");
+    sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto)
+        .expect("command failed to submit");
 
     Ok(())
+}
+
+fn path_to_vec(path: PathBuf) -> Vec<String> {
+    path.components()
+        .map(|comp| comp.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    async fn setup() {}
+
+    #[test]
+    fn test_receive_file() {
+        let file_name = "/tmp/filesend_123.tst";
+        let tmp_file = File::create(file_name);
+        assert_eq!(tmp_file.is_err(), false);
+        fs::remove_file(file_name);
+        // TODO complete test
+    }
 }
