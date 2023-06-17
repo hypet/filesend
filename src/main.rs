@@ -1,6 +1,7 @@
 // #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::{env, thread};
 /*
 GUI Windows-compatible application written in Rust with druid.
@@ -17,7 +18,7 @@ use druid::{
 
 use tokio::runtime::{Builder, Runtime};
 
-use networking::process_incoming;
+use networking::{process_incoming, switch_transfer_state};
 use networking::send;
 use networking::TRANSMITTITNG_FILENAME_VAL_FN;
 
@@ -33,19 +34,21 @@ struct AppState {
     incoming_file_name: String,
     incoming_file_size: Arc<Mutex<i64>>,
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
+    outgoing_file_processing: Arc<Mutex<bool>>,
 }
 
 impl AppState {
     fn new() -> AppState {
         AppState {
-            file_name: "".to_string(),
-            host: "".into(),
-            port: "".into(),
+            file_name: "f:\\vid\\Дейзи Миллер.avi".to_string(),
+            host: "127.0.0.1".into(),
+            port: "8080".into(),
             progress: 0.0,
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
             incoming_file_size: Arc::new(Mutex::from(0)),
             connections: Arc::new(Mutex::from(HashMap::new())),
+            outgoing_file_processing: Arc::new(Mutex::from(true)),
         }
     }
 }
@@ -111,6 +114,15 @@ fn build_gui() -> impl Widget<AppState> {
             data.file_name.is_empty() || (data.progress > 0.00 && data.progress < 1.0)
         })
         .fix_height(30.0);
+    let stop_button = Button::new("Stop")
+        .on_click(|ctx, data: &mut AppState, _| switch_transfer_state(data, false))
+        .disabled_if(|data: &AppState, _| {
+            data.file_name.is_empty() || (data.progress == 0.00 || data.progress == 1.0)
+        })
+        .fix_height(30.0);
+    let buttons_row = Flex::row()
+        .with_child(send_button)
+        .with_child(stop_button);
 
     let incoming_filename_label =
         Label::new(|data: &AppState, _: &_| data.incoming_file_name.clone())
@@ -132,7 +144,7 @@ fn build_gui() -> impl Widget<AppState> {
         .with_child(open)
         .with_child(address)
         .with_spacer(10.0)
-        .with_child(send_button)
+        .with_child(buttons_row)
         .with_spacer(10.0)
         .with_child(incoming_filename_label)
         .with_spacer(10.0)

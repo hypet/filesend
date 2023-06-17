@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Instant;
 
 use druid::{ExtEventSink, Selector, Target};
 use msgpacker::prelude::*;
@@ -15,6 +16,7 @@ use crate::AppState;
 pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_val_fn");
 pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> =
     Selector::new("transmitting_filename_val_fn");
+const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 
 pub enum DataType {
     FILE,
@@ -105,6 +107,7 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
     const BUF_SIZE: usize = 1024;
     let mut buf = [0u8; BUF_SIZE];
     let file_size = msg_file.file_size;
+    let mut last_update = Instant::now();
 
     if file_size < BUF_SIZE as u64 {
         let mut buf = vec![0u8; file_size as usize];
@@ -115,10 +118,9 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
         total_received += read_bytes as u64;
         file.write_all(&buf).unwrap();
 
-        sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto)
-            .expect("command failed to submit");
+        update_progress_incoming(&sink, 1.0);
     } else {
-        let mut counter: u8 = 0;
+        let mut counter: u32 = 0;
         while total_received < file_size {
             let read_bytes = socket.read_exact(&mut buf).await?;
             if read_bytes == 0 {
@@ -135,20 +137,20 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
                 file.write_all(&buf).unwrap();
                 total_received += n as u64;
 
-                sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto)
-                    .expect("command failed to submit");
+                update_progress_incoming(&sink, 1.0);
                 break;
             }
 
             counter += 1;
             let percentage = total_received as f64 / file_size as f64;
 
-            if counter % 100 == 0 {
-                sink.submit_command(PROGRESSBAR_VAL_FN, percentage, Target::Auto)
-                    .expect("command failed to submit");
+            if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
+                update_progress_incoming(&sink, percentage);
                 counter = 0;
+                last_update = Instant::now();
             }
         }
+        update_progress_incoming(&sink, 1.0);
     }
     println!("< Received {} bytes", total_received);
 
@@ -184,22 +186,29 @@ async fn handle_text_buf(socket: &mut TcpStream, msg_size: u64) -> io::Result<()
 
 //////// Sending part
 
-pub(crate) fn send(data: &mut AppState, sink: ExtEventSink) {
-    let s = sink.clone();
-    let path = data.file_name.clone();
-    let host = data.host.clone();
-    let port = data.port.clone();
+pub(crate) fn switch_transfer_state(app_state: &mut AppState, val: bool) {
+    let mut outgoing_flag = app_state.outgoing_file_processing.lock().unwrap();
+    *outgoing_flag = val;
+}
 
-    let rt = data.rt.clone();
+pub(crate) fn send(app_state: &mut AppState, sink: ExtEventSink) {
+    switch_transfer_state(app_state, true);
+    let s = sink.clone();
+    let path = app_state.file_name.clone();
+    let host = app_state.host.clone();
+    let port = app_state.port.clone();
+
+    let rt = app_state.rt.clone();
+    let mut app_state = app_state.clone();
     thread::spawn(move || {
         rt.block_on(async move {
-            send_file(path, host, port, s.clone()).await;
+            send_file(&mut app_state, path, host, port, s.clone()).await;
             println!("Sender thread died");
         });
     });
 }
 
-async fn send_file(path: String, host: String, port: String, sink: ExtEventSink) {
+async fn send_file(app_state: &mut AppState, path: String, host: String, port: String, sink: ExtEventSink) {
     let path = Path::new(path.as_str());
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port))
@@ -216,7 +225,7 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
                     "> Sending dir: entry_path: {}",
                     entry_path.to_str().unwrap()
                 );
-                match send_single_dir(&mut stream, entry_path.to_path_buf()).await {
+                match send_single_dir(&mut stream, entry_path.to_path_buf(), sink.clone()).await {
                     Ok(_) => {}
                     Err(e) => println!("Error: {}", e),
                 }
@@ -225,6 +234,7 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
                 let mut full_path = PathBuf::from(path.clone());
                 full_path.push(entry.path().file_name().unwrap().to_str().unwrap());
                 match send_single_file(
+                    app_state,
                     &mut stream,
                     entry_full_path,
                     entry_path.to_path_buf(),
@@ -240,6 +250,7 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
     } else {
         let entry_path = path.strip_prefix(path_parent).unwrap();
         match send_single_file(
+            app_state,
             &mut stream,
             path.to_str().unwrap(),
             entry_path.to_path_buf(),
@@ -253,7 +264,8 @@ async fn send_file(path: String, host: String, port: String, sink: ExtEventSink)
     }
 }
 
-async fn send_single_dir(stream: &mut TcpStream, dir_path_buf: PathBuf) -> io::Result<()> {
+async fn send_single_dir(stream: &mut TcpStream, dir_path_buf: PathBuf, sink: ExtEventSink) -> io::Result<()> {
+    update_progress_incoming(&sink, 0.0);
     let data = FileMeta {
         file_relative_path: path_to_vec(dir_path_buf),
         file_size: 0,
@@ -265,11 +277,13 @@ async fn send_single_dir(stream: &mut TcpStream, dir_path_buf: PathBuf) -> io::R
     stream.write_u64(msg_size as u64).await?;
     stream.write_u8(DataType::DIRECTORY.to_u8()).await?;
     stream.write(&buf).await?;
+    update_progress_incoming(&sink, 1.0);
 
     Ok(())
 }
 
 async fn send_single_file(
+    app_state: &mut AppState,
     stream: &mut TcpStream,
     file_name: &str,
     relative_path: PathBuf,
@@ -280,8 +294,7 @@ async fn send_single_file(
         file_name, relative_path
     );
 
-    sink.submit_command(PROGRESSBAR_VAL_FN, 0.0, Target::Auto)
-        .expect("command failed to submit");
+    update_progress_incoming(&sink, 0.0);
     sink.submit_command(
         TRANSMITTITNG_FILENAME_VAL_FN,
         file_name.to_string(),
@@ -307,9 +320,15 @@ async fn send_single_file(
 
     let mut buf = [0; 1024];
     let mut total_sent: u64 = 0;
-    let mut counter = 0;
+    let mut counter: u32 = 0;
+    let mut last_update = Instant::now();
 
     while let Ok(n) = file.read(&mut buf) {
+        let outgoing_flag = app_state.outgoing_file_processing.lock().unwrap();
+        if !*outgoing_flag {
+            break;
+        }
+
         if n == 0 {
             break;
         }
@@ -324,16 +343,20 @@ async fn send_single_file(
         total_sent += n as u64;
         let percentage = total_sent as f64 / file_size as f64;
 
-        if counter % 100 == 0 {
-            sink.submit_command(PROGRESSBAR_VAL_FN, percentage, Target::Auto)
-                .expect("command failed to submit");
+        if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
+            update_progress_incoming(&sink, percentage);
+            last_update = Instant::now();
             counter = 0;
         }
     }
-    sink.submit_command(PROGRESSBAR_VAL_FN, 1.0, Target::Auto)
-        .expect("command failed to submit");
+    update_progress_incoming(&sink, 1.0);
 
     Ok(())
+}
+
+fn update_progress_incoming(sink: &ExtEventSink, value: f64) {
+    sink.submit_command(PROGRESSBAR_VAL_FN, value, Target::Auto)
+        .expect("command failed to submit");
 }
 
 fn path_to_vec(path: PathBuf) -> Vec<String> {
