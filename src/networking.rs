@@ -17,6 +17,7 @@ pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_
 pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> =
     Selector::new("transmitting_filename_val_fn");
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
+const TRANSMITTING_BUF_SIZE: usize = 1024;
 
 pub enum DataType {
     File,
@@ -86,11 +87,11 @@ async fn handle_msg_pack(socket: &mut TcpStream, sink: &ExtEventSink) -> io::Res
 }
 
 async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    println!("handling file");
+    println!("< handling file");
     let mut buf = vec![0u8; msg_size as usize];
     socket.read_exact(&mut buf).await?;
     let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
-    println!("Decoded {} bytes for msgPack", bytes);
+    println!("< Decoded {} bytes for msgPack", bytes);
 
     let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
 
@@ -104,16 +105,15 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
 
     let mut file = File::create(&relative_path).unwrap();
     let mut total_received: u64 = 0;
-    const BUF_SIZE: usize = 1024;
-    let mut buf = [0u8; BUF_SIZE];
+    let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
     let file_size = msg_file.file_size;
     let mut last_update = Instant::now();
 
-    if file_size < BUF_SIZE as u64 {
+    if file_size < TRANSMITTING_BUF_SIZE as u64 {
         let mut buf = vec![0u8; file_size as usize];
         let read_bytes = socket.read_exact(&mut buf).await?;
         if read_bytes == 0 {
-            println!("< Can't read data");
+            eprintln!("< Can't read data");
         }
         total_received += read_bytes as u64;
         file.write_all(&buf).unwrap();
@@ -131,7 +131,7 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
             file.write_all(&buf)?;
 
             let bytes_left: i128 = file_size as i128 - total_received as i128;
-            if bytes_left > 0 && bytes_left < BUF_SIZE as i128 {
+            if bytes_left > 0 && bytes_left < TRANSMITTING_BUF_SIZE as i128 {
                 let mut buf = vec![0u8; (file_size - total_received) as usize];
                 let n = socket.read_exact(&mut buf).await?;
                 file.write_all(&buf).unwrap();
@@ -221,13 +221,10 @@ async fn send_file(app_state: &mut AppState, path: String, host: String, port: S
             let entry = entry.unwrap();
             let entry_path: &Path = entry.path().strip_prefix(path_parent).unwrap();
             if entry.path().is_dir() {
-                println!(
-                    "> Sending dir: entry_path: {}",
-                    entry_path.to_str().unwrap()
-                );
+                println!("> Sending dir: entry_path: {}", entry_path.to_str().unwrap());
                 match send_single_dir(&mut stream, entry_path.to_path_buf(), sink.clone()).await {
                     Ok(_) => {}
-                    Err(e) => println!("Error: {}", e),
+                    Err(e) => eprintln!("Error while sending dir: {}", e),
                 }
             } else {
                 let entry_full_path = entry.path().to_str().unwrap();
@@ -243,7 +240,7 @@ async fn send_file(app_state: &mut AppState, path: String, host: String, port: S
                 .await
                 {
                     Ok(_) => {}
-                    Err(e) => println!("Error: {}", e),
+                    Err(e) => eprintln!("Error while sending file: {}", e),
                 }
             }
         }
@@ -259,7 +256,7 @@ async fn send_file(app_state: &mut AppState, path: String, host: String, port: S
         .await
         {
             Ok(_) => {}
-            Err(e) => println!("Error: {}", e),
+            Err(e) => eprintln!("Error while sending single file: {}", e),
         }
     }
 }
@@ -318,7 +315,7 @@ async fn send_single_file(
     stream.write_u8(DataType::File.to_u8()).await?;
     stream.write(&buf).await?;
 
-    let mut buf = [0; 1024];
+    let mut buf = [0; TRANSMITTING_BUF_SIZE];
     let mut total_sent: u64 = 0;
     let mut counter: u32 = 0;
     let mut last_update = Instant::now();
@@ -335,7 +332,7 @@ async fn send_single_file(
         match stream.write_all(&buf[0..n]).await {
             Ok(_) => {}
             Err(e) => {
-                println!("> Error: {}", e);
+                eprintln!("> Error while writing buf into stream: {}", e);
                 break;
             }
         }

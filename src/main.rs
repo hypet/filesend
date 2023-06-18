@@ -188,7 +188,7 @@ async fn start_tokio(sink: ExtEventSink, port: String) {
         let sink_clone = sink.clone();
         println!("Connected");
         if let Err(error) = process_incoming(sink_clone, &mut socket).await {
-            println!("Error: {}", error);
+            eprintln!("Error while processing incoming client: {}", error);
         }
     }
 }
