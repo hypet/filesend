@@ -19,25 +19,25 @@ pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> =
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 
 pub enum DataType {
-    FILE,
-    DIRECTORY,
-    TEXT_BUFFER,
+    File,
+    Directory,
+    TextBuffer,
 }
 
 impl DataType {
     pub fn to_u8(&self) -> u8 {
         match self {
-            DataType::FILE => 0,
-            DataType::DIRECTORY => 1,
-            DataType::TEXT_BUFFER => 2,
+            DataType::File => 0,
+            DataType::Directory => 1,
+            DataType::TextBuffer => 2,
         }
     }
 
     pub fn from_u8(value: u8) -> Option<DataType> {
         match value {
-            0 => Some(DataType::FILE),
-            1 => Some(DataType::DIRECTORY),
-            2 => Some(DataType::TEXT_BUFFER),
+            0 => Some(DataType::File),
+            1 => Some(DataType::Directory),
+            2 => Some(DataType::TextBuffer),
             _ => None,
         }
     }
@@ -69,13 +69,13 @@ async fn handle_msg_pack(socket: &mut TcpStream, sink: &ExtEventSink) -> io::Res
     println!("msg_size: {}, msg_type: {}", msg_size, msg_type);
 
     match DataType::from_u8(msg_type) {
-        Some(DataType::FILE) => {
+        Some(DataType::File) => {
             handle_file(sink.clone(), socket, msg_size).await?;
         }
-        Some(DataType::DIRECTORY) => {
+        Some(DataType::Directory) => {
             handle_dir(socket, msg_size).await?;
         }
-        Some(DataType::TEXT_BUFFER) => {
+        Some(DataType::TextBuffer) => {
             handle_text_buf(socket, msg_size).await?;
         }
         None => {
@@ -275,7 +275,7 @@ async fn send_single_dir(stream: &mut TcpStream, dir_path_buf: PathBuf, sink: Ex
     let msg_size = data.pack(&mut buf);
 
     stream.write_u64(msg_size as u64).await?;
-    stream.write_u8(DataType::DIRECTORY.to_u8()).await?;
+    stream.write_u8(DataType::Directory.to_u8()).await?;
     stream.write(&buf).await?;
     update_progress_incoming(&sink, 1.0);
 
@@ -315,7 +315,7 @@ async fn send_single_file(
     println!("Packed msg size: {}", msg_size);
 
     stream.write_u64(msg_size as u64).await?;
-    stream.write_u8(DataType::FILE.to_u8()).await?;
+    stream.write_u8(DataType::File.to_u8()).await?;
     stream.write(&buf).await?;
 
     let mut buf = [0; 1024];

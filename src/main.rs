@@ -1,7 +1,6 @@
 // #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::{env, thread};
 /*
 GUI Windows-compatible application written in Rust with druid.
@@ -40,9 +39,9 @@ struct AppState {
 impl AppState {
     fn new() -> AppState {
         AppState {
-            file_name: "f:\\vid\\Дейзи Миллер.avi".to_string(),
-            host: "127.0.0.1".into(),
-            port: "8080".into(),
+            file_name: "".to_string(),
+            host: "".into(),
+            port: "".into(),
             progress: 0.0,
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
@@ -115,7 +114,7 @@ fn build_gui() -> impl Widget<AppState> {
         })
         .fix_height(30.0);
     let stop_button = Button::new("Stop")
-        .on_click(|ctx, data: &mut AppState, _| switch_transfer_state(data, false))
+        .on_click(|_ctx, data: &mut AppState, _| switch_transfer_state(data, false))
         .disabled_if(|data: &AppState, _| {
             data.file_name.is_empty() || (data.progress == 0.00 || data.progress == 1.0)
         })
