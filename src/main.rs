@@ -20,8 +20,12 @@ use tokio::runtime::{Builder, Runtime};
 use networking::{process_incoming, switch_transfer_state};
 use networking::send;
 use networking::TRANSMITTITNG_FILENAME_VAL_FN;
+use networking::PROGRESSBAR_VAL_FN;
+use autodiscovery::HOST_ADDRESS_VAL_FN;
+use autodiscovery::HOST_PORT_VAL_FN;
 
 mod networking;
+mod autodiscovery;
 
 #[derive(Clone, Data, Lens)]
 struct AppState {
@@ -31,7 +35,7 @@ struct AppState {
     progress: f64,
     rt: Arc<Runtime>,
     incoming_file_name: String,
-    incoming_file_size: Arc<Mutex<i64>>,
+    incoming_file_size: u64,
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
 }
@@ -45,7 +49,7 @@ impl AppState {
             progress: 0.0,
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
-            incoming_file_size: Arc::new(Mutex::from(0)),
+            incoming_file_size: 0,
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
         }
@@ -70,7 +74,15 @@ impl AppDelegate<AppState> for Delegate {
             }
             data.file_name = filename;
             return Handled::Yes;
-        } else if let Some(number) = cmd.get(networking::PROGRESSBAR_VAL_FN) {
+        } else if let Some(address) = cmd.get(HOST_ADDRESS_VAL_FN) {
+            data.host = (*address).clone();
+            println!("host = {}", data.host);
+            return Handled::Yes;
+        } else if let Some(port) = cmd.get(HOST_PORT_VAL_FN) {
+            data.port = (*port).clone();
+            println!("port = {}", data.port);
+            return Handled::Yes;
+        } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             data.progress = *number;
             return Handled::Yes;
         } else if let Some(file_name) = cmd.get(TRANSMITTITNG_FILENAME_VAL_FN) {
@@ -80,6 +92,12 @@ impl AppDelegate<AppState> for Delegate {
 
         Handled::No
     }
+}
+
+#[derive(Debug)]
+struct PeerAddress {
+    ip: String,
+    port: u16
 }
 
 fn build_gui() -> impl Widget<AppState> {
@@ -166,11 +184,15 @@ fn main() {
     let launcher = AppLauncher::with_window(window);
 
     let event_sink = launcher.get_external_handle();
-    let port = args[1].clone();
-    thread::spawn(|| {
+    let mut port: String = "0".to_string();
+    if args.len() > 1 && !args[1].is_empty() {
+        port = args[1].clone();
+    }
+
+    thread::spawn(move || {
         start_tokio(event_sink, port);
     });
-
+    
     launcher
         .delegate(Delegate)
         .log_to_console()
@@ -183,6 +205,13 @@ async fn start_tokio(sink: ExtEventSink, port: String) {
     let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
         .await
         .unwrap();
+
+    let port = listener.local_addr().unwrap().port();
+    let sink_clone = sink.clone();
+    thread::spawn(move || {
+        autodiscovery::start(sink_clone, port);
+    });
+
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();

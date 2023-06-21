@@ -14,8 +14,7 @@ use walkdir::WalkDir;
 use crate::AppState;
 
 pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_val_fn");
-pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> =
-    Selector::new("transmitting_filename_val_fn");
+pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> = Selector::new("transmitting_filename_val_fn");
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 const TRANSMITTING_BUF_SIZE: usize = 1024;
 
