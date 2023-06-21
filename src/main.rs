@@ -27,6 +27,8 @@ use autodiscovery::HOST_PORT_VAL_FN;
 mod networking;
 mod autodiscovery;
 
+const RANDOM_PORT: u16 = 0;
+
 #[derive(Clone, Data, Lens)]
 struct AppState {
     file_name: String,
@@ -76,11 +78,9 @@ impl AppDelegate<AppState> for Delegate {
             return Handled::Yes;
         } else if let Some(address) = cmd.get(HOST_ADDRESS_VAL_FN) {
             data.host = (*address).clone();
-            println!("host = {}", data.host);
             return Handled::Yes;
         } else if let Some(port) = cmd.get(HOST_PORT_VAL_FN) {
             data.port = (*port).clone();
-            println!("port = {}", data.port);
             return Handled::Yes;
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             data.progress = *number;
@@ -184,7 +184,7 @@ fn main() {
     let launcher = AppLauncher::with_window(window);
 
     let event_sink = launcher.get_external_handle();
-    let mut port: String = "0".to_string();
+    let mut port: String = RANDOM_PORT.to_string();
     if args.len() > 1 && !args[1].is_empty() {
         port = args[1].clone();
     }

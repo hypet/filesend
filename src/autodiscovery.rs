@@ -2,7 +2,7 @@ use druid::{ExtEventSink, Selector, Target};
 use local_ip_address::local_ip;
 use searchlight::{
 	broadcast::{BroadcasterBuilder, ServiceBuilder},
-	net::{IpVersion, TargetInterfaceV4, TargetInterfaceV6}, discovery::{DiscoveryBuilder, DiscoveryEvent}, dns::{rr::Record, op::DnsResponse},
+	net::{IpVersion, TargetInterfaceV4, TargetInterfaceV6}, discovery::{DiscoveryBuilder, DiscoveryEvent}, dns::{op::DnsResponse},
 };
 use std::{
 	net::{IpAddr, Ipv4Addr},
@@ -20,7 +20,7 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
     let (discovery_tx, discovery_rx) = mpsc::sync_channel(100);
 
 	let local_ip = local_ip().unwrap().to_string();
-    println!("This is my local IP address: {}", local_ip);
+    println!("Local address: {}:{}", local_ip, port);
 
 	let _broadcaster = BroadcasterBuilder::new()
 		.interface_v4(TargetInterfaceV4::All)
@@ -36,7 +36,7 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 		.unwrap()
 		.run_in_background();
 
-	std::thread::sleep(Duration::from_secs(1));
+	std::thread::sleep(Duration::from_secs(1)); // Postpone due to GUI initialization
 	let _discovery = DiscoveryBuilder::new()
 		.loopback()
 		.service(SERVICE_TYPE)
@@ -45,21 +45,18 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 		.unwrap()
 		.run_in_background(move |event| {
 			if let DiscoveryEvent::ResponderFound(responder) = event {
-				// println!("responder: {:?}", responder);
 				match discovery_tx.try_send(responder) {
 					Ok(_) => {},
-					Err(e) => eprintln!("Got error: {:?}", e.to_string()),
+					Err(e) => eprintln!("Error: {:?}", e.to_string()),
 				};
 			}
 		});
 
 	loop {
-		println!("Receiving events...");
 		let event = discovery_rx.recv();
-		println!("Got event");
 		if event.is_ok() {
 			let addr: Option<PeerAddress> = get_target_address(&event.unwrap().last_response, &local_ip);
-			println!("addrs: {:?}", addr);
+			println!("New remote address: {:?}", addr);
 
 			match addr {
 				Some(a) => {
@@ -83,7 +80,6 @@ fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<P
 			match record.data() {
 				Some(searchlight::dns::rr::RData::TXT(_txt)) => {},
 				Some(searchlight::dns::rr::RData::SRV(srv)) => {
-					println!("srv: {:?}", srv);
 					target_port = Some(srv.port());
 				},
 				Some(searchlight::dns::rr::RData::A(a_record)) => { 
@@ -95,12 +91,10 @@ fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<P
 				Some(searchlight::dns::rr::RData::AAAA(aaaa_record)) => {
 					target_ip_v6 = Some(aaaa_record.to_string())
 				},
-				Some(&_) => println!("Other"),
-				None => println!("None: {:?}", record),
+				Some(&_) => {},
+				None => {},
 			}
 	);
-
-	println!("ipv4: {:?}, ipv6: {:?}, port: {:?}", target_ip_v4, target_ip_v6, target_port);
 
     if (target_ip_v4.is_some() || target_ip_v6.is_some()) && target_port.is_some() {
         return Some(PeerAddress { ip: target_ip_v4.unwrap(), port: target_port.unwrap() });
