@@ -60,7 +60,7 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 		if event.is_ok() {
 			let addrs: Vec<PeerAddress> = event.unwrap().last_response.additionals().iter()
 				.map(|record| get_ip_addr(record, &local_ip))
-				// .filter(|peer| peer.is_some())
+				.filter(|peer| peer.is_some())
 				.map(|record| record.unwrap())
 				.collect();
 			println!("addrs: {:?}", addrs);
@@ -83,6 +83,7 @@ fn get_ip_addr(record: &Record, local_ip: &String) -> Option<PeerAddress> {
     match record.data() {
         Some(searchlight::dns::rr::RData::TXT(_txt)) => {},
         Some(searchlight::dns::rr::RData::SRV(srv)) => {
+			println!("srv: {:?}", srv);
             target_port = Some(srv.port());
         },
         Some(searchlight::dns::rr::RData::A(a_record)) => { 
