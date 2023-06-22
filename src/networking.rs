@@ -14,8 +14,10 @@ use walkdir::WalkDir;
 use crate::AppState;
 
 pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_val_fn");
+pub(crate) const PROGRESSBAR_DTR_VAL_FN: Selector<u32> = Selector::new("progressbar_dtr_val_fn");
 pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> = Selector::new("transmitting_filename_val_fn");
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
+const UPDATE_DTR_PERIOD_MS: u128 = 1000;
 const TRANSMITTING_BUF_SIZE: usize = 1024;
 
 pub enum DataType {
@@ -316,8 +318,10 @@ async fn send_single_file(
 
     let mut buf = [0; TRANSMITTING_BUF_SIZE];
     let mut total_sent: u64 = 0;
-    let mut counter: u32 = 0;
-    let mut last_update = Instant::now();
+    let mut iter_counter: u32 = 0;
+    let mut last_progress_update = Instant::now();
+    let mut last_dtr_update = Instant::now();
+    let mut sent_bytes_per_second: u32 = 0;
 
     while let Ok(n) = file.read(&mut buf) {
         let outgoing_flag = app_state.outgoing_file_processing.lock().unwrap();
@@ -335,23 +339,36 @@ async fn send_single_file(
                 break;
             }
         }
-        counter += 1;
+        iter_counter += 1;
         total_sent += n as u64;
         let percentage = total_sent as f64 / file_size as f64;
+        sent_bytes_per_second += n as u32;
 
-        if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
+        if iter_counter % 100 == 0 && last_progress_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
             update_progress_incoming(&sink, percentage);
-            last_update = Instant::now();
-            counter = 0;
+            last_progress_update = Instant::now();
+            iter_counter = 0;
         }
+
+        if last_dtr_update.elapsed().as_millis() >= UPDATE_DTR_PERIOD_MS {
+            update_dtr(&sink, sent_bytes_per_second);
+            last_dtr_update = Instant::now();
+            sent_bytes_per_second = 0;
+        } 
     }
     update_progress_incoming(&sink, 1.0);
+    update_dtr(&sink, 0);
 
     Ok(())
 }
 
 fn update_progress_incoming(sink: &ExtEventSink, value: f64) {
     sink.submit_command(PROGRESSBAR_VAL_FN, value, Target::Auto)
+        .expect("command failed to submit");
+}
+
+fn update_dtr(sink: &ExtEventSink, value: u32) {
+    sink.submit_command(PROGRESSBAR_DTR_VAL_FN, value, Target::Auto)
         .expect("command failed to submit");
 }
 

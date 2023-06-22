@@ -56,14 +56,11 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 		let event = discovery_rx.recv();
 		if event.is_ok() {
 			let addr: Option<PeerAddress> = get_target_address(&event.unwrap().last_response, &local_ip);
-			println!("New remote address: {:?}", addr);
-
-			match addr {
-				Some(a) => {
-					update_host_addr(&sink, a.ip);
-					update_host_port(&sink, a.port.to_string());
-				},			
-				None => {},
+			if addr.is_some() {
+				let a = addr.unwrap();
+				println!("New remote address: {:?}", a);
+				update_host_addr(&sink, a.ip);
+				update_host_port(&sink, a.port.to_string());
 			}
 		} else {
 			eprintln!("Error while receiving discovery event: {:?}", event.err());

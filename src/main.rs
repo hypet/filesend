@@ -9,18 +9,20 @@ Application has functionality to choose a file and send it over network to anoth
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 
-use druid::widget::{Button, Container, Flex, Label, ProgressBar, TextBox};
+
+use druid::widget::{Button, Container, Flex, Label, ProgressBar, TextBox, List};
 use druid::{
     commands, AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, ExtEventSink,
     FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc,
 };
-
+use human_bytes::human_bytes;
 use tokio::runtime::{Builder, Runtime};
 
 use networking::{process_incoming, switch_transfer_state};
 use networking::send;
 use networking::TRANSMITTITNG_FILENAME_VAL_FN;
 use networking::PROGRESSBAR_VAL_FN;
+use networking::PROGRESSBAR_DTR_VAL_FN;
 use autodiscovery::HOST_ADDRESS_VAL_FN;
 use autodiscovery::HOST_PORT_VAL_FN;
 
@@ -35,6 +37,7 @@ struct AppState {
     host: String,
     port: String,
     progress: f64,
+    dtr: String, // Data Transfer Rate
     rt: Arc<Runtime>,
     incoming_file_name: String,
     incoming_file_size: u64,
@@ -45,13 +48,15 @@ struct AppState {
 impl AppState {
     fn new() -> AppState {
         AppState {
-            file_name: "".to_string(),
+            file_name: "".into(),
             host: "".into(),
             port: "".into(),
             progress: 0.0,
+            dtr: "".into(),
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
             incoming_file_size: 0,
+            // target_list:
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
         }
@@ -84,6 +89,15 @@ impl AppDelegate<AppState> for Delegate {
             return Handled::Yes;
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             data.progress = *number;
+            return Handled::Yes;
+        } else if let Some(dtr) = cmd.get(PROGRESSBAR_DTR_VAL_FN) {
+            data.dtr = if *dtr > 0 { 
+                let mut dtr = human_bytes(*dtr);
+                dtr.push_str("/s");
+                dtr
+            } else { 
+                "".into() 
+            };
             return Handled::Yes;
         } else if let Some(file_name) = cmd.get(TRANSMITTITNG_FILENAME_VAL_FN) {
             data.incoming_file_name = (*file_name).clone();
@@ -149,8 +163,14 @@ fn build_gui() -> impl Widget<AppState> {
         .lens(AppState::progress)
         .expand_width()
         .center();
+
     let progress_label =
         Label::new(|data: &AppState, _: &_| format!("{:.2}%", data.progress * 100.0)).center();
+    let progress_speed =
+        Label::new(|data: &AppState, _: &_| data.dtr.clone()).align_right();
+    let progress_row = Flex::row()
+        .with_child(progress_label)
+        .with_child(progress_speed);
 
     let address = Flex::row()
         .with_child(host_textbox)
@@ -167,7 +187,7 @@ fn build_gui() -> impl Widget<AppState> {
         .with_spacer(10.0)
         .with_child(progress_bar)
         .with_spacer(10.0)
-        .with_child(progress_label);
+        .with_child(progress_row);
 
     Container::new(main_column).center()
 }
