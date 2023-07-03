@@ -6,32 +6,40 @@ use std::{env, thread};
 GUI Windows-compatible application written in Rust with druid.
 Application has functionality to choose a file and send it over network to another computer.
 */
+use druid::im::Vector;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 
-
-use druid::widget::{Button, Container, Flex, Label, ProgressBar, TextBox, List};
+use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, TextBox};
 use druid::{
     commands, AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, ExtEventSink,
-    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc,
+    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, EventCtx, Selector, UnitPoint,
 };
 use human_bytes::human_bytes;
 use tokio::runtime::{Builder, Runtime};
 
-use networking::{process_incoming, switch_transfer_state};
+use autodiscovery::TARGET_PEER_VAL_FN;
 use networking::send;
-use networking::TRANSMITTITNG_FILENAME_VAL_FN;
-use networking::PROGRESSBAR_VAL_FN;
+use networking::send_clipboard;
 use networking::PROGRESSBAR_DTR_VAL_FN;
-use autodiscovery::HOST_ADDRESS_VAL_FN;
-use autodiscovery::HOST_PORT_VAL_FN;
+use networking::PROGRESSBAR_VAL_FN;
+use networking::TRANSMITTITNG_FILENAME_VAL_FN;
+use networking::{process_incoming, switch_transfer_state};
 
-mod networking;
 mod autodiscovery;
+mod networking;
 
 const RANDOM_PORT: u16 = 0;
+const SET_CURRENT_TARGET: Selector<TargetPeer> = Selector::new("set_current_target_val_fn");
 
-#[derive(Clone, Data, Lens)]
+#[derive(Debug, Clone, Data, Lens)]
+struct TargetPeer {
+    hostname: String,
+    ip: String,
+    port: u16,
+}
+
+#[derive(Debug, Clone, Data, Lens)]
 struct AppState {
     file_name: String,
     host: String,
@@ -41,6 +49,7 @@ struct AppState {
     rt: Arc<Runtime>,
     incoming_file_name: String,
     incoming_file_size: u64,
+    target_list: Vector<TargetPeer>,
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
 }
@@ -56,7 +65,7 @@ impl AppState {
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
             incoming_file_size: 0,
-            // target_list:
+            target_list: Vector::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
         }
@@ -81,22 +90,23 @@ impl AppDelegate<AppState> for Delegate {
             }
             data.file_name = filename;
             return Handled::Yes;
-        } else if let Some(address) = cmd.get(HOST_ADDRESS_VAL_FN) {
-            data.host = (*address).clone();
+        } else if let Some(address) = cmd.get(TARGET_PEER_VAL_FN) {
+            data.target_list.push_back((*address).clone());
             return Handled::Yes;
-        } else if let Some(port) = cmd.get(HOST_PORT_VAL_FN) {
-            data.port = (*port).clone();
+        } else if let Some(address) = cmd.get(SET_CURRENT_TARGET) {
+            data.host = (*address).ip.clone();
+            data.port = (*address).port.to_string();
             return Handled::Yes;
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             data.progress = *number;
             return Handled::Yes;
         } else if let Some(dtr) = cmd.get(PROGRESSBAR_DTR_VAL_FN) {
-            data.dtr = if *dtr > 0 { 
+            data.dtr = if *dtr > 0 {
                 let mut dtr = human_bytes(*dtr);
                 dtr.push_str("/s");
                 dtr
-            } else { 
-                "".into() 
+            } else {
+                "".into()
             };
             return Handled::Yes;
         } else if let Some(file_name) = cmd.get(TRANSMITTITNG_FILENAME_VAL_FN) {
@@ -106,12 +116,6 @@ impl AppDelegate<AppState> for Delegate {
 
         Handled::No
     }
-}
-
-#[derive(Debug)]
-struct PeerAddress {
-    ip: String,
-    port: u16
 }
 
 fn build_gui() -> impl Widget<AppState> {
@@ -139,6 +143,9 @@ fn build_gui() -> impl Widget<AppState> {
         .align_left()
         .lens(AppState::port);
 
+    let send_clipboard = Button::new("Send Clipboard")
+        .on_click(|_, data: &mut AppState, _| send_clipboard(data))
+        .fix_height(30.0);
     let send_button = Button::new("Send")
         .on_click(|ctx, data: &mut AppState, _| send(data, ctx.get_external_handle()))
         .disabled_if(|data: &AppState, _| {
@@ -152,6 +159,7 @@ fn build_gui() -> impl Widget<AppState> {
         })
         .fix_height(30.0);
     let buttons_row = Flex::row()
+        .with_child(send_clipboard)
         .with_child(send_button)
         .with_child(stop_button);
 
@@ -166,8 +174,7 @@ fn build_gui() -> impl Widget<AppState> {
 
     let progress_label =
         Label::new(|data: &AppState, _: &_| format!("{:.2}%", data.progress * 100.0)).center();
-    let progress_speed =
-        Label::new(|data: &AppState, _: &_| data.dtr.clone()).align_right();
+    let progress_speed = Label::new(|data: &AppState, _: &_| data.dtr.clone()).align_right();
     let progress_row = Flex::row()
         .with_child(progress_label)
         .with_child(progress_speed);
@@ -176,6 +183,7 @@ fn build_gui() -> impl Widget<AppState> {
         .with_child(host_textbox)
         .with_spacer(10.0)
         .with_child(port_textbox);
+
     let main_column = Flex::column()
         .with_child(file_name_textbox)
         .with_child(open)
@@ -187,9 +195,33 @@ fn build_gui() -> impl Widget<AppState> {
         .with_spacer(10.0)
         .with_child(progress_bar)
         .with_spacer(10.0)
-        .with_child(progress_row);
+        .with_child(progress_row)
+        .fix_width(400.0)
+    ;
 
-    Container::new(main_column).center()
+    let target_list = Flex::column().with_child(
+        List::new(build_target_peer_item)
+            .lens(AppState::target_list)
+            .fix_width(200.0)
+    )
+    .align_vertical(UnitPoint::TOP);
+
+    let main_row = Flex::row()
+        .with_child(main_column)
+        .with_child(target_list);
+
+    Container::new(main_row).center()
+}
+
+fn build_target_peer_item() -> impl Widget<TargetPeer> {
+    Flex::row().with_child(
+        Button::dynamic(|data: &String, _| data.clone()).lens(TargetPeer::hostname)
+            .on_click(|ctx: &mut EventCtx, data: &mut TargetPeer, _| {
+                ctx.get_external_handle().submit_command(SET_CURRENT_TARGET, data.clone(), Target::Auto)
+                    .expect("command failed to submit");
+            })
+            .fix_width(180.0)
+    )
 }
 
 fn main() {
@@ -199,7 +231,7 @@ fn main() {
 
     let window = WindowDesc::new(build_gui())
         .title("File Transfer")
-        .window_size((400.0, 250.0));
+        .window_size((600.0, 250.0));
 
     let launcher = AppLauncher::with_window(window);
 
@@ -212,7 +244,7 @@ fn main() {
     thread::spawn(move || {
         start_tokio(event_sink, port);
     });
-    
+
     launcher
         .delegate(Delegate)
         .log_to_console()

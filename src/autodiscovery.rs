@@ -10,11 +10,10 @@ use std::{
 	str::FromStr, sync::mpsc, time::Duration,
 };
 
-use crate::PeerAddress;
+use crate::TargetPeer;
 
-pub(crate) const HOST_ADDRESS_VAL_FN: Selector<String> = Selector::new("host_address_val_fn");
-pub(crate) const HOST_PORT_VAL_FN: Selector<String> = Selector::new("host_port_val_fn");
-const SERVICE_TYPE: &'static str = "_filesend._tcp.local";
+pub(crate) const TARGET_PEER_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_val_fn");
+const SERVICE_TYPE: &'static str = "_filesend._tcp";
 
 pub(crate) fn start(sink: ExtEventSink, port: u16) {
     let (discovery_tx, discovery_rx) = mpsc::sync_channel(100);
@@ -36,7 +35,7 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 		.unwrap()
 		.run_in_background();
 
-	std::thread::sleep(Duration::from_secs(1)); // Postpone due to GUI initialization
+	std::thread::sleep(Duration::from_millis(500)); // Postpone due to GUI initialization
 	let _discovery = DiscoveryBuilder::new()
 		.loopback()
 		.service(SERVICE_TYPE)
@@ -55,12 +54,11 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 	loop {
 		let event = discovery_rx.recv();
 		if event.is_ok() {
-			let addr: Option<PeerAddress> = get_target_address(&event.unwrap().last_response, &local_ip);
+			let addr: Option<TargetPeer> = get_target_address(&event.unwrap().last_response, &local_ip);
 			if addr.is_some() {
 				let a = addr.unwrap();
 				println!("New remote address: {:?}", a);
-				update_host_addr(&sink, a.ip);
-				update_host_port(&sink, a.port.to_string());
+				update_target_peer(&sink, a);
 			}
 		} else {
 			eprintln!("Error while receiving discovery event: {:?}", event.err());
@@ -68,16 +66,18 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 	}
 }
 
-fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<PeerAddress> {
+fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<TargetPeer> {
+    let mut target_host: Option<String> = None;
     let mut target_ip_v4: Option<String> = None;
     let mut target_ip_v6: Option<String> = None;
     let mut target_port: Option<u16> = None;
 	dns_response.additionals().iter()
-		.for_each(|record|     
+		.for_each(|record|     {
 			match record.data() {
 				Some(searchlight::dns::rr::RData::TXT(_txt)) => {},
 				Some(searchlight::dns::rr::RData::SRV(srv)) => {
 					target_port = Some(srv.port());
+					target_host = Some(srv.target().to_string());
 				},
 				Some(searchlight::dns::rr::RData::A(a_record)) => { 
 					let a_rec_str = a_record.to_string();
@@ -91,21 +91,21 @@ fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<P
 				Some(&_) => {},
 				None => {},
 			}
+		}
 	);
 
     if (target_ip_v4.is_some() || target_ip_v6.is_some()) && target_port.is_some() {
-        return Some(PeerAddress { ip: target_ip_v4.unwrap(), port: target_port.unwrap() });
+        return Some(TargetPeer { 
+			hostname: target_host.unwrap().replace(".local", "").replace(".", ""),  //TODO: get rid of .replace()
+			ip: if target_ip_v4.is_some() { target_ip_v4.unwrap()} else { target_ip_v6.unwrap() }, 
+			port: target_port.unwrap() 
+		});
     } else {
         return None;
     }
 }
 
-fn update_host_addr(sink: &ExtEventSink, value: String) {
-    sink.submit_command(HOST_ADDRESS_VAL_FN, value, Target::Auto)
-        .expect("command failed to submit");
-}
-
-fn update_host_port(sink: &ExtEventSink, value: String) {
-    sink.submit_command(HOST_PORT_VAL_FN, value, Target::Auto)
+fn update_target_peer(sink: &ExtEventSink, value: TargetPeer) {
+    sink.submit_command(TARGET_PEER_VAL_FN, value, Target::Auto)
         .expect("command failed to submit");
 }
