@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -61,24 +62,24 @@ pub struct TextMeta {
 
 //////// Receiving part
 
-pub(crate) async fn process_incoming(sink: ExtEventSink, socket: &mut TcpStream) -> io::Result<()> {
+pub(crate) async fn process_incoming(app_state: Arc<AppState>, sink: ExtEventSink, socket: &mut TcpStream) -> io::Result<()> {
     loop {
         println!("process_incoming");
-        handle_msg_pack(socket, &sink).await?;
+        handle_msg_pack(app_state.clone(), socket, &sink).await?;
     }
 }
 
-async fn handle_msg_pack(socket: &mut TcpStream, sink: &ExtEventSink) -> io::Result<()> {
+async fn handle_msg_pack(app_state: Arc<AppState>, socket: &mut TcpStream, sink: &ExtEventSink) -> io::Result<()> {
     let msg_size = socket.read_u64().await?;
     let msg_type = socket.read_u8().await?;
     println!("msg_size: {}, msg_type: {}", msg_size, msg_type);
 
     match DataType::from_u8(msg_type) {
         Some(DataType::File) => {
-            handle_file(sink.clone(), socket, msg_size).await?;
+            handle_file(app_state.clone(), sink.clone(), socket, msg_size).await?;
         }
         Some(DataType::Directory) => {
-            handle_dir(socket, msg_size).await?;
+            handle_dir(app_state.clone(), socket, msg_size).await?;
         }
         Some(DataType::TextBuffer) => {
             handle_text_buf(socket, msg_size).await?;
@@ -90,7 +91,7 @@ async fn handle_msg_pack(socket: &mut TcpStream, sink: &ExtEventSink) -> io::Res
     Ok(())
 }
 
-async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
+async fn handle_file(app_state: Arc<AppState>, sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
     let mut buf = vec![0u8; msg_size as usize];
     socket.read_exact(&mut buf).await?;
     let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
@@ -109,7 +110,7 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
     )
     .expect("command failed to submit");
 
-    let mut file = File::create(&relative_path).unwrap();
+    let mut file = File::create(app_state.receiving_dir.join(relative_path)).unwrap();
     let mut total_received: u64 = 0;
     let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
     let file_size = msg_file.file_size;
@@ -163,7 +164,7 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
     Ok(())
 }
 
-async fn handle_dir(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
+async fn handle_dir(app_state: Arc<AppState>, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
     let mut buf = vec![0u8; msg_size as usize];
     socket.read_exact(&mut buf).await?;
     let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
@@ -172,7 +173,7 @@ async fn handle_dir(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
     let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
 
     println!("< Received dir: {:?}", relative_path);
-    fs::create_dir_all(relative_path.as_path()).unwrap();
+    fs::create_dir_all(app_state.receiving_dir.join(relative_path).as_path()).unwrap();
 
     Ok(())
 }

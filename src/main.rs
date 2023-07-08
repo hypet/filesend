@@ -1,13 +1,15 @@
 // #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
-use std::{env, thread, cmp, hash};
+use std::path::PathBuf;
+use std::{env, thread, cmp, hash, fs};
 /*
 GUI Windows-compatible application written in Rust with druid.
 Application has functionality to choose a file and send it over network to another computer.
 */
 use druid::im::{Vector, HashSet};
 use druid::lens::Identity;
+use home::home_dir;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -33,6 +35,7 @@ mod networking;
 
 const RANDOM_PORT: u16 = 0;
 const SET_CURRENT_TARGET: Selector<TargetPeer> = Selector::new("set_current_target_val_fn");
+const DEFAULT_RCV_DIR: [&'static str; 2] = ["Downloads", "filesend"];
 
 #[derive(Debug, Clone, Data, Lens, Eq, PartialOrd, Ord)]
 struct TargetPeer {
@@ -64,9 +67,10 @@ struct AppState {
     rt: Arc<Runtime>,
     incoming_file_name: String,
     incoming_file_size: u64,
-    target_list: HashSet<TargetPeer>,
+    target_list: HashSet<TargetPeer>, // Address list of available receivers
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
+    receiving_dir: Arc<PathBuf>,
 }
 
 impl AppState {
@@ -83,6 +87,7 @@ impl AppState {
             target_list: HashSet::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
+            receiving_dir: Arc::new(create_receiving_dir_if_needed())
         }
     }
 }
@@ -161,25 +166,28 @@ fn build_gui() -> impl Widget<AppState> {
         .align_left()
         .lens(AppState::port);
 
-    let send_clipboard = Button::new("Send Clipboard")
+    let send_clipboard_button = Button::new("Send Clipboard")
         .on_click(|_, data: &mut AppState, _| send_clipboard(data))
+        .disabled_if(|data: &AppState, _| {
+            data.host.is_empty() || data.port.is_empty()
+        })
         .fix_height(30.0);
     let send_button = Button::new("Send")
         .on_click(|ctx, data: &mut AppState, _| send(data, ctx.get_external_handle()))
         .disabled_if(|data: &AppState, _| {
-            data.file_name.is_empty() || (data.progress > 0.00 && data.progress < 1.0)
+            data.file_name.is_empty() || (data.progress > 0.00 && data.progress < 1.0) || data.host.is_empty() || data.port.is_empty()
         })
         .fix_height(30.0);
     let stop_button = Button::new("Stop")
         .on_click(|_ctx, data: &mut AppState, _| switch_transfer_state(data, false))
         .disabled_if(|data: &AppState, _| {
-            data.file_name.is_empty() || (data.progress == 0.00 || data.progress == 1.0)
+            data.file_name.is_empty() || (data.progress == 0.00 || data.progress == 1.0) || data.host.is_empty() || data.port.is_empty()
         })
         .fix_height(30.0);
     let buttons_row = Flex::row()
-        .with_child(send_clipboard)
         .with_child(send_button)
-        .with_child(stop_button);
+        .with_child(stop_button)
+        .with_child(send_clipboard_button);
 
     let incoming_filename_label =
         Label::new(|data: &AppState, _: &_| data.incoming_file_name.clone())
@@ -275,8 +283,10 @@ fn main() {
         port = args[1].clone();
     }
 
+    let app_state_clone = Arc::new(app_state.clone());
+
     thread::spawn(move || {
-        start_tokio(event_sink, port);
+        start_tokio(app_state_clone, event_sink, port);
     });
 
     launcher
@@ -287,7 +297,7 @@ fn main() {
 }
 
 #[tokio::main]
-async fn start_tokio(sink: ExtEventSink, port: String) {
+async fn start_tokio(app_state: Arc<AppState>, sink: ExtEventSink, port: String) {
     let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
         .await
         .unwrap();
@@ -302,8 +312,26 @@ async fn start_tokio(sink: ExtEventSink, port: String) {
         let (mut socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
         println!("Connected");
-        if let Err(error) = process_incoming(sink_clone, &mut socket).await {
+        if let Err(error) = process_incoming(app_state.clone(), sink_clone, &mut socket).await {
             eprintln!("Error while processing incoming client: {}", error);
         }
+    }
+}
+
+fn create_receiving_dir_if_needed() -> PathBuf {
+    let mut dir = home_dir().unwrap();
+    dir.extend(DEFAULT_RCV_DIR);
+    match fs::metadata(&dir) {
+        Ok(_) => return dir,
+        Err(_) => {
+            println!("Creating dir: {:?}", dir);
+            match fs::create_dir_all(&dir) {
+                Ok(_) => return dir,
+                Err(_) => {
+                    eprintln!("Error while creating dir {:?}", dir);
+                    PathBuf::new()
+                }
+            }
+        },
     }
 }
