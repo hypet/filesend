@@ -91,7 +91,6 @@ async fn handle_msg_pack(socket: &mut TcpStream, sink: &ExtEventSink) -> io::Res
 }
 
 async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    println!("< handling file");
     let mut buf = vec![0u8; msg_size as usize];
     socket.read_exact(&mut buf).await?;
     let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
@@ -165,7 +164,6 @@ async fn handle_file(sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) 
 }
 
 async fn handle_dir(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    println!("handling dir");
     let mut buf = vec![0u8; msg_size as usize];
     socket.read_exact(&mut buf).await?;
     let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
@@ -180,7 +178,6 @@ async fn handle_dir(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
 }
 
 async fn handle_text_buf(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    println!("handling text_buf");
     let mut buf = vec![0u8; msg_size as usize];
     socket.read_exact(&mut buf).await?;
     let (bytes, msg_text) = TextMeta::unpack(&buf).unwrap();
@@ -199,6 +196,7 @@ async fn handle_text_buf(socket: &mut TcpStream, msg_size: u64) -> io::Result<()
 
 //////// Sending part
 
+// For transmit pausing purpose
 pub(crate) fn switch_transfer_state(app_state: &mut AppState, val: bool) {
     let mut outgoing_flag = app_state.outgoing_file_processing.lock().unwrap();
     *outgoing_flag = val;
@@ -246,14 +244,16 @@ async fn send_clipboard_inner(
 
     stream.write_u64(msg_size as u64).await?;
     stream.write_u8(DataType::TextBuffer.to_u8()).await?;
-    stream.write(&buf).await?;
+    let bytes = stream.write(&buf).await?;
+    if bytes < buf.len() {
+        eprintln!("Bytes written is less than buffer len")
+    }
 
     Ok(())
 }
 
 pub(crate) fn send(app_state: &mut AppState, sink: ExtEventSink) {
     switch_transfer_state(app_state, true);
-    let s = sink.clone();
     let path = app_state.file_name.clone();
     let host = app_state.host.clone();
     let port = app_state.port.clone();
@@ -262,7 +262,7 @@ pub(crate) fn send(app_state: &mut AppState, sink: ExtEventSink) {
     let mut app_state = app_state.clone();
     thread::spawn(move || {
         rt.block_on(async move {
-            send_file(&mut app_state, path, host, port, s.clone()).await;
+            send_file(&mut app_state, path, host, port, sink).await;
             println!("Sender thread died");
         });
     });
@@ -346,7 +346,10 @@ async fn send_single_dir(
 
     stream.write_u64(msg_size as u64).await?;
     stream.write_u8(DataType::Directory.to_u8()).await?;
-    stream.write(&buf).await?;
+    let bytes = stream.write(&buf).await?;
+    if bytes < buf.len() {
+        eprintln!("Bytes written is less than buffer len")
+    }
     update_progress_incoming(&sink, 1.0);
 
     Ok(())
@@ -386,7 +389,10 @@ async fn send_single_file(
 
     stream.write_u64(msg_size as u64).await?;
     stream.write_u8(DataType::File.to_u8()).await?;
-    stream.write(&buf).await?;
+    let bytes = stream.write(&buf).await?;
+    if bytes < buf.len() {
+        eprintln!("Bytes written is less than buffer len")
+    }
 
     let mut buf = [0; TRANSMITTING_BUF_SIZE];
     let mut total_sent: u64 = 0;
@@ -396,9 +402,18 @@ async fn send_single_file(
     let mut sent_bytes_per_second: u32 = 0;
 
     while let Ok(n) = file.read(&mut buf) {
-        let outgoing_flag = app_state.outgoing_file_processing.lock().unwrap();
-        if !*outgoing_flag {
-            break;
+        if iter_counter % 100 == 0 {
+            let outgoing_flag = app_state.outgoing_file_processing.lock().unwrap();
+            if !*outgoing_flag {
+                break;
+            }
+    
+            if last_progress_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
+                let percentage = total_sent as f64 / file_size as f64;
+                update_progress_incoming(&sink, percentage);
+                last_progress_update = Instant::now();
+                iter_counter = 0;
+            }
         }
 
         if n == 0 {
@@ -413,16 +428,7 @@ async fn send_single_file(
         }
         iter_counter += 1;
         total_sent += n as u64;
-        let percentage = total_sent as f64 / file_size as f64;
         sent_bytes_per_second += n as u32;
-
-        if iter_counter % 100 == 0
-            && last_progress_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS
-        {
-            update_progress_incoming(&sink, percentage);
-            last_progress_update = Instant::now();
-            iter_counter = 0;
-        }
 
         if last_dtr_update.elapsed().as_millis() >= UPDATE_DTR_PERIOD_MS {
             update_dtr(&sink, sent_bytes_per_second);

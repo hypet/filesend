@@ -102,13 +102,13 @@ fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<T
 	);
 
     if (target_ip_v4.is_some() || target_ip_v6.is_some()) && target_port.is_some() {
-        return Some(TargetPeer { 
-			hostname: target_host.unwrap().replace(".local", "").replace(".", ""),  //TODO: get rid of .replace()
-			ip: if target_ip_v4.is_some() { target_ip_v4.unwrap()} else { target_ip_v6.unwrap() }, 
+        Some(TargetPeer { 
+			hostname: target_host.unwrap().replace(".local", "").replace('.', ""),  //TODO: get rid of .replace()
+			ip: if target_ip_v4.is_some() { target_ip_v4.unwrap() } else { target_ip_v6.unwrap() }, 
 			port: target_port.unwrap() 
-		});
+		})
     } else {
-        return None;
+        None
     }
 }
 
