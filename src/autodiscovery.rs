@@ -7,16 +7,16 @@ use searchlight::{
 use std::{
 	net::{IpAddr, Ipv4Addr},
 	str,
-	str::FromStr, sync::mpsc, time::Duration,
+	str::FromStr, time::Duration,
 };
 
 use crate::TargetPeer;
 
-pub(crate) const TARGET_PEER_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_val_fn");
+pub(crate) const TARGET_PEER_ADD_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_add_val_fn");
+pub(crate) const TARGET_PEER_REMOVE_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_remove_val_fn");
 const SERVICE_TYPE: &'static str = "_filesend._tcp";
 
 pub(crate) fn start(sink: ExtEventSink, port: u16) {
-    let (discovery_tx, discovery_rx) = mpsc::sync_channel(100);
 
 	let local_ip = local_ip().unwrap().to_string();
     println!("Local address: {}:{}", local_ip, port);
@@ -43,26 +43,36 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 		.build(IpVersion::Both)
 		.unwrap()
 		.run_in_background(move |event| {
-			if let DiscoveryEvent::ResponderFound(responder) = event {
-				match discovery_tx.try_send(responder) {
-					Ok(_) => {},
-					Err(e) => eprintln!("Error: {:?}", e.to_string()),
-				};
+			match event {
+				DiscoveryEvent::ResponderFound(responder) => {
+					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
+					if addr.is_some() {
+						let a = addr.unwrap();
+						println!("New remote address: {:?}", a);
+						update_target_peer(&sink, a);
+					}
+				}
+				DiscoveryEvent::ResponderLost(responder) => {
+					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
+					if addr.is_some() {
+						let a = addr.unwrap();
+						println!("Removing address: {:?}", a);
+						remove_target_peer(&sink, a);
+					}
+				}
+				DiscoveryEvent::ResponseUpdate { old: _responder_old, new: responder_new } => {
+					let addr: Option<TargetPeer> = get_target_address(&responder_new.last_response, &local_ip);
+					if addr.is_some() {
+						let a = addr.unwrap();
+						println!("Update address: {:?}", a);
+						update_target_peer(&sink, a);
+					}
+				}
 			}
 		});
 
 	loop {
-		let event = discovery_rx.recv();
-		if event.is_ok() {
-			let addr: Option<TargetPeer> = get_target_address(&event.unwrap().last_response, &local_ip);
-			if addr.is_some() {
-				let a = addr.unwrap();
-				println!("New remote address: {:?}", a);
-				update_target_peer(&sink, a);
-			}
-		} else {
-			eprintln!("Error while receiving discovery event: {:?}", event.err());
-		}
+		std::thread::sleep(Duration::from_millis(100));
 	}
 }
 
@@ -106,6 +116,11 @@ fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<T
 }
 
 fn update_target_peer(sink: &ExtEventSink, value: TargetPeer) {
-    sink.submit_command(TARGET_PEER_VAL_FN, value, Target::Auto)
+    sink.submit_command(TARGET_PEER_ADD_VAL_FN, value, Target::Auto)
+        .expect("command failed to submit");
+}
+
+fn remove_target_peer(sink: &ExtEventSink, value: TargetPeer) {
+    sink.submit_command(TARGET_PEER_REMOVE_VAL_FN, value, Target::Auto)
         .expect("command failed to submit");
 }

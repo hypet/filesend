@@ -1,24 +1,26 @@
 // #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
-use std::{env, thread};
+use std::{env, thread, cmp, hash};
 /*
 GUI Windows-compatible application written in Rust with druid.
 Application has functionality to choose a file and send it over network to another computer.
 */
-use druid::im::Vector;
+use druid::im::{Vector, HashSet};
+use druid::lens::Identity;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 
-use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, TextBox};
+use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, TextBox, Scroll};
 use druid::{
     commands, AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, ExtEventSink,
-    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, EventCtx, Selector, UnitPoint,
+    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, EventCtx, Selector, UnitPoint, LensExt,
 };
 use human_bytes::human_bytes;
 use tokio::runtime::{Builder, Runtime};
 
-use autodiscovery::TARGET_PEER_VAL_FN;
+use autodiscovery::TARGET_PEER_ADD_VAL_FN;
+use autodiscovery::TARGET_PEER_REMOVE_VAL_FN;
 use networking::send;
 use networking::send_clipboard;
 use networking::PROGRESSBAR_DTR_VAL_FN;
@@ -32,11 +34,24 @@ mod networking;
 const RANDOM_PORT: u16 = 0;
 const SET_CURRENT_TARGET: Selector<TargetPeer> = Selector::new("set_current_target_val_fn");
 
-#[derive(Debug, Clone, Data, Lens)]
+#[derive(Debug, Clone, Data, Lens, Eq, PartialOrd, Ord)]
 struct TargetPeer {
     hostname: String,
     ip: String,
     port: u16,
+}
+
+// Assuming one running instance of the application we take into account IP only
+impl cmp::PartialEq for TargetPeer {
+    fn eq(&self, other: &Self) -> bool {
+        self.ip == other.ip
+    }
+}
+
+impl hash::Hash for TargetPeer {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.ip.hash(state);
+    }
 }
 
 #[derive(Debug, Clone, Data, Lens)]
@@ -49,7 +64,7 @@ struct AppState {
     rt: Arc<Runtime>,
     incoming_file_name: String,
     incoming_file_size: u64,
-    target_list: Vector<TargetPeer>,
+    target_list: HashSet<TargetPeer>,
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
 }
@@ -65,7 +80,7 @@ impl AppState {
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
             incoming_file_size: 0,
-            target_list: Vector::new(),
+            target_list: HashSet::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
         }
@@ -90,8 +105,11 @@ impl AppDelegate<AppState> for Delegate {
             }
             data.file_name = filename;
             return Handled::Yes;
-        } else if let Some(address) = cmd.get(TARGET_PEER_VAL_FN) {
-            data.target_list.push_back((*address).clone());
+        } else if let Some(address) = cmd.get(TARGET_PEER_ADD_VAL_FN) {
+            data.target_list.insert((*address).clone());
+            return Handled::Yes;
+        } else if let Some(address) = cmd.get(TARGET_PEER_REMOVE_VAL_FN) {
+            data.target_list.remove(address);
             return Handled::Yes;
         } else if let Some(address) = cmd.get(SET_CURRENT_TARGET) {
             data.host = (*address).ip.clone();
@@ -200,9 +218,20 @@ fn build_gui() -> impl Widget<AppState> {
     ;
 
     let target_list = Flex::column().with_child(
-        List::new(build_target_peer_item)
-            .lens(AppState::target_list)
-            .fix_width(200.0)
+        Scroll::new(
+            List::new(|| {
+                build_target_peer_item()
+            })
+                .fix_width(200.0)
+        )
+        .vertical()
+        .lens(Identity.map(
+            |d: &AppState| { 
+                let v: Vector<TargetPeer> = d.target_list.clone().into_iter().collect();
+                v
+            }, 
+            |_, _| {})
+        )
     )
     .align_vertical(UnitPoint::TOP);
 
@@ -215,7 +244,12 @@ fn build_gui() -> impl Widget<AppState> {
 
 fn build_target_peer_item() -> impl Widget<TargetPeer> {
     Flex::row().with_child(
-        Button::dynamic(|data: &String, _| data.clone()).lens(TargetPeer::hostname)
+        Button::dynamic(|data: &String, _| data.clone()).lens(Identity.map(
+            |d: &TargetPeer| { 
+                format!("{}\n{}:{}", d.hostname, d.ip, d.port).to_string()
+            }, 
+            |_, _| {})
+        )
             .on_click(|ctx: &mut EventCtx, data: &mut TargetPeer, _| {
                 ctx.get_external_handle().submit_command(SET_CURRENT_TARGET, data.clone(), Target::Auto)
                     .expect("command failed to submit");
