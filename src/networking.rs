@@ -377,7 +377,7 @@ async fn send_single_file(
 
     let data = FileMeta {
         file_relative_path: path_to_vec(relative_path),
-        file_size: file_size,
+        file_size,
     };
 
     let mut buf = Vec::new();

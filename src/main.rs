@@ -112,8 +112,8 @@ impl AppDelegate<AppState> for Delegate {
             data.target_list.remove(address);
             return Handled::Yes;
         } else if let Some(address) = cmd.get(SET_CURRENT_TARGET) {
-            data.host = (*address).ip.clone();
-            data.port = (*address).port.to_string();
+            data.host = address.ip.clone();
+            data.port = address.port.to_string();
             return Handled::Yes;
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             data.progress = *number;
@@ -142,7 +142,7 @@ fn build_gui() -> impl Widget<AppState> {
         .with_text_size(18.0)
         .expand_width()
         .align_left()
-        .lens(AppState::file_name.clone());
+        .lens(AppState::file_name);
     let open_dialog_options = FileDialogOptions::new()
         .name_label("Files or dirs to send")
         .title("Files or dirs to send")
@@ -246,7 +246,7 @@ fn build_target_peer_item() -> impl Widget<TargetPeer> {
     Flex::row().with_child(
         Button::dynamic(|data: &String, _| data.clone()).lens(Identity.map(
             |d: &TargetPeer| { 
-                format!("{}\n{}:{}", d.hostname, d.ip, d.port).to_string()
+                format!("{}\n{}:{}", d.hostname, d.ip, d.port)
             }, 
             |_, _| {})
         )

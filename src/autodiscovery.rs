@@ -14,7 +14,7 @@ use crate::TargetPeer;
 
 pub(crate) const TARGET_PEER_ADD_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_add_val_fn");
 pub(crate) const TARGET_PEER_REMOVE_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_remove_val_fn");
-const SERVICE_TYPE: &'static str = "_filesend._tcp";
+const SERVICE_TYPE: &str = "_filesend._tcp";
 
 pub(crate) fn start(sink: ExtEventSink, port: u16) {
 
@@ -46,24 +46,21 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 			match event {
 				DiscoveryEvent::ResponderFound(responder) => {
 					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
-					if addr.is_some() {
-						let a = addr.unwrap();
+					if let Some(a) = addr {
 						println!("New remote address: {:?}", a);
 						update_target_peer(&sink, a);
 					}
 				}
 				DiscoveryEvent::ResponderLost(responder) => {
 					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
-					if addr.is_some() {
-						let a = addr.unwrap();
+					if let Some(a) = addr {
 						println!("Removing address: {:?}", a);
 						remove_target_peer(&sink, a);
 					}
 				}
 				DiscoveryEvent::ResponseUpdate { old: _responder_old, new: responder_new } => {
 					let addr: Option<TargetPeer> = get_target_address(&responder_new.last_response, &local_ip);
-					if addr.is_some() {
-						let a = addr.unwrap();
+					if let Some(a) = addr {
 						println!("Update address: {:?}", a);
 						update_target_peer(&sink, a);
 					}
