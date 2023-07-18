@@ -15,8 +15,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, TextBox, Scroll};
 use druid::{
-    commands, AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, ExtEventSink,
-    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, EventCtx, Selector, UnitPoint, LensExt,
+    AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, ExtEventSink,
+    FileDialogOptions, Handled, Lens, Target, Widget, WidgetExt, WindowDesc, EventCtx, Selector, UnitPoint, LensExt, FileInfo,
 };
 use human_bytes::human_bytes;
 use tokio::runtime::{Builder, Runtime};
@@ -35,7 +35,9 @@ mod networking;
 
 const RANDOM_PORT: u16 = 0;
 const SET_CURRENT_TARGET: Selector<TargetPeer> = Selector::new("set_current_target_val_fn");
-const DEFAULT_RCV_DIR: [&'static str; 2] = ["Downloads", "filesend"];
+const ACCEPT_OPEN_FILE_TO_SEND: Selector<FileInfo> = Selector::new("accept_file_to_send");
+const ACCEPT_OPEN_TARGET_DIR: Selector<FileInfo> = Selector::new("accept_target_dir");
+const DEFAULT_RCV_DIR: [&str; 2] = ["Downloads", "filesend"];
 
 #[derive(Debug, Clone, Data, Lens, Eq, PartialOrd, Ord)]
 struct TargetPeer {
@@ -58,6 +60,11 @@ impl hash::Hash for TargetPeer {
 }
 
 #[derive(Debug, Clone, Data, Lens)]
+struct InnerState {
+    target_dir: String,
+}
+
+#[derive(Debug, Clone, Data, Lens)]
 struct AppState {
     file_name: String,
     host: String,
@@ -70,7 +77,8 @@ struct AppState {
     target_list: HashSet<TargetPeer>, // Address list of available receivers
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
-    receiving_dir: Arc<PathBuf>,
+    target_dir: String,
+    // innter: Arc<Mutex<InnerState>>,
 }
 
 impl AppState {
@@ -87,7 +95,8 @@ impl AppState {
             target_list: HashSet::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
-            receiving_dir: Arc::new(create_receiving_dir_if_needed())
+            target_dir: create_receiving_dir_if_needed().to_str().unwrap().into(),
+            // innter: Arc::new(Mutex::new(InnerState {  })),
         }
     }
 }
@@ -100,31 +109,32 @@ impl AppDelegate<AppState> for Delegate {
         _ctx: &mut DelegateCtx,
         _target: Target,
         cmd: &Command,
-        data: &mut AppState,
+        app_state: &mut AppState,
         _env: &Env,
     ) -> Handled {
-        if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
-            let mut filename = String::new();
-            if let Some(file) = file_info.path().to_str() {
-                filename.push_str(file);
-            }
-            data.file_name = filename;
+        if let Some(file_info) = cmd.get(ACCEPT_OPEN_FILE_TO_SEND) {
+            app_state.file_name = file_info.path().to_str().unwrap().into();
+            return Handled::Yes;
+        } else if let Some(dir_info) = cmd.get(ACCEPT_OPEN_TARGET_DIR) {
+            // let mut lock = app_state.innter.lock().unwrap();
+            app_state.target_dir = dir_info.path().to_str().unwrap().into();
+            
             return Handled::Yes;
         } else if let Some(address) = cmd.get(TARGET_PEER_ADD_VAL_FN) {
-            data.target_list.insert((*address).clone());
+            app_state.target_list.insert((*address).clone());
             return Handled::Yes;
         } else if let Some(address) = cmd.get(TARGET_PEER_REMOVE_VAL_FN) {
-            data.target_list.remove(address);
+            app_state.target_list.remove(address);
             return Handled::Yes;
         } else if let Some(address) = cmd.get(SET_CURRENT_TARGET) {
-            data.host = address.ip.clone();
-            data.port = address.port.to_string();
+            app_state.host = address.ip.clone();
+            app_state.port = address.port.to_string();
             return Handled::Yes;
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
-            data.progress = *number;
+            app_state.progress = *number;
             return Handled::Yes;
         } else if let Some(dtr) = cmd.get(PROGRESSBAR_DTR_VAL_FN) {
-            data.dtr = if *dtr > 0 {
+            app_state.dtr = if *dtr > 0 {
                 let mut dtr = human_bytes(*dtr);
                 dtr.push_str("/s");
                 dtr
@@ -133,7 +143,7 @@ impl AppDelegate<AppState> for Delegate {
             };
             return Handled::Yes;
         } else if let Some(file_name) = cmd.get(TRANSMITTITNG_FILENAME_VAL_FN) {
-            data.incoming_file_name = (*file_name).clone();
+            app_state.incoming_file_name = (*file_name).clone();
             return Handled::Yes;
         }
 
@@ -142,20 +152,49 @@ impl AppDelegate<AppState> for Delegate {
 }
 
 fn build_gui() -> impl Widget<AppState> {
+    // File to send
+    let open_dialog_options = FileDialogOptions::new()
+        .name_label("Files or dirs to send")
+        .accept_command(ACCEPT_OPEN_FILE_TO_SEND)
+        .title("Files or dirs to send")
+        .button_text("Open");
     let file_name_textbox = TextBox::new()
         .with_placeholder("File Name")
         .with_text_size(18.0)
-        .expand_width()
+        .fix_width(320.0)
         .align_left()
         .lens(AppState::file_name);
-    let open_dialog_options = FileDialogOptions::new()
+    let open_file_button = Button::new("Open").on_click(move |ctx, _, _| {
+        ctx.submit_command(druid::commands::SHOW_OPEN_PANEL.with(open_dialog_options.clone()))
+    })
+        .fix_height(25.0);
+    let file_row = Flex::row()
+        .with_child(file_name_textbox)
+        .with_child(open_file_button)
+        .expand_width();
+    
+    // Target dir
+    let target_dir_open_dialog_options = FileDialogOptions::new()
+        .select_directories()
+        .accept_command(ACCEPT_OPEN_TARGET_DIR)
         .name_label("Files or dirs to send")
         .title("Files or dirs to send")
         .button_text("Open");
-    let open = Button::new("Open").on_click(move |ctx, _, _| {
-        ctx.submit_command(druid::commands::SHOW_OPEN_PANEL.with(open_dialog_options.clone()))
+    let open_target_dir_button = Button::new("Open").on_click(move |ctx, _, _| {
+        ctx.submit_command(druid::commands::SHOW_OPEN_PANEL.with(target_dir_open_dialog_options.clone()))
     });
+    let target_dir_textbox = TextBox::new()
+        .with_placeholder("Target Directory")
+        .with_text_size(18.0)
+        .fix_width(320.0)
+        .align_left()
+        .lens(AppState::target_dir);
+    let target_dir_row = Flex::row()
+        .with_child(target_dir_textbox)
+        .with_child(open_target_dir_button)
+        .expand_width();
 
+    // Host and port
     let host_textbox = TextBox::new()
         .with_placeholder("Host")
         .align_left()
@@ -165,7 +204,13 @@ fn build_gui() -> impl Widget<AppState> {
         .with_placeholder("Port")
         .align_left()
         .lens(AppState::port);
+    let address = Flex::row()
+        .with_child(host_textbox)
+        .with_spacer(10.0)
+        .with_child(port_textbox);
 
+
+    // Send buttons
     let send_clipboard_button = Button::new("Send Clipboard")
         .on_click(|_, data: &mut AppState, _| send_clipboard(data))
         .disabled_if(|data: &AppState, _| {
@@ -205,14 +250,11 @@ fn build_gui() -> impl Widget<AppState> {
         .with_child(progress_label)
         .with_child(progress_speed);
 
-    let address = Flex::row()
-        .with_child(host_textbox)
-        .with_spacer(10.0)
-        .with_child(port_textbox);
-
     let main_column = Flex::column()
-        .with_child(file_name_textbox)
-        .with_child(open)
+        .with_child(file_row)
+        .with_spacer(5.0)
+        .with_child(target_dir_row)
+        .with_spacer(10.0)
         .with_child(address)
         .with_spacer(10.0)
         .with_child(buttons_row)
@@ -273,7 +315,7 @@ fn main() {
 
     let window = WindowDesc::new(build_gui())
         .title("File Transfer")
-        .window_size((600.0, 250.0));
+        .window_size((600.0, 280.0));
 
     let launcher = AppLauncher::with_window(window);
 
@@ -311,7 +353,6 @@ async fn start_tokio(app_state: Arc<AppState>, sink: ExtEventSink, port: String)
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
-        println!("Connected");
         if let Err(error) = process_incoming(app_state.clone(), sink_clone, &mut socket).await {
             eprintln!("Error while processing incoming client: {}", error);
         }

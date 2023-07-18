@@ -110,7 +110,7 @@ async fn handle_file(app_state: Arc<AppState>, sink: ExtEventSink, socket: &mut 
     )
     .expect("command failed to submit");
 
-    let mut file = File::create(app_state.receiving_dir.join(relative_path)).unwrap();
+    let mut file = File::create(PathBuf::new().join(app_state.target_dir.clone()).join(relative_path)).unwrap();
     let mut total_received: u64 = 0;
     let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
     let file_size = msg_file.file_size;
@@ -173,7 +173,7 @@ async fn handle_dir(app_state: Arc<AppState>, socket: &mut TcpStream, msg_size: 
     let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
 
     println!("< Received dir: {:?}", relative_path);
-    fs::create_dir_all(app_state.receiving_dir.join(relative_path).as_path()).unwrap();
+    fs::create_dir_all(PathBuf::new().join(app_state.target_dir.clone()).join(relative_path).as_path()).unwrap();
 
     Ok(())
 }
