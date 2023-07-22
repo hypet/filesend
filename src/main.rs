@@ -10,7 +10,7 @@ Application has functionality to choose a file and send it over network to anoth
 use druid::im::{Vector, HashSet};
 use druid::lens::Identity;
 use home::home_dir;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::{TcpListener, TcpStream};
 
 use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, TextBox, Scroll};
@@ -23,6 +23,7 @@ use tokio::runtime::{Builder, Runtime};
 
 use autodiscovery::TARGET_PEER_ADD_VAL_FN;
 use autodiscovery::TARGET_PEER_REMOVE_VAL_FN;
+use networking::ArcRwLock;
 use networking::send;
 use networking::send_clipboard;
 use networking::PROGRESSBAR_DTR_VAL_FN;
@@ -60,11 +61,6 @@ impl hash::Hash for TargetPeer {
 }
 
 #[derive(Debug, Clone, Data, Lens)]
-struct InnerState {
-    target_dir: String,
-}
-
-#[derive(Debug, Clone, Data, Lens)]
 struct AppState {
     file_name: String,
     host: String,
@@ -77,8 +73,7 @@ struct AppState {
     target_list: HashSet<TargetPeer>, // Address list of available receivers
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
-    target_dir: String,
-    // innter: Arc<Mutex<InnerState>>,
+    target_dir: ArcRwLock,
 }
 
 impl AppState {
@@ -95,8 +90,7 @@ impl AppState {
             target_list: HashSet::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
-            target_dir: create_receiving_dir_if_needed().to_str().unwrap().into(),
-            // innter: Arc::new(Mutex::new(InnerState {  })),
+            target_dir: Arc::from(RwLock::from(create_receiving_dir_if_needed().to_str().unwrap().to_string())),
         }
     }
 }
@@ -116,9 +110,8 @@ impl AppDelegate<AppState> for Delegate {
             app_state.file_name = file_info.path().to_str().unwrap().into();
             return Handled::Yes;
         } else if let Some(dir_info) = cmd.get(ACCEPT_OPEN_TARGET_DIR) {
-            // let mut lock = app_state.innter.lock().unwrap();
-            app_state.target_dir = dir_info.path().to_str().unwrap().into();
-            
+            let mut lock = app_state.target_dir.write().unwrap();
+            *lock = dir_info.path().to_str().unwrap().to_string();
             return Handled::Yes;
         } else if let Some(address) = cmd.get(TARGET_PEER_ADD_VAL_FN) {
             app_state.target_list.insert((*address).clone());
@@ -188,7 +181,17 @@ fn build_gui() -> impl Widget<AppState> {
         .with_text_size(18.0)
         .fix_width(320.0)
         .align_left()
-        .lens(AppState::target_dir);
+        .lens(Identity.map(
+            |app_state: &AppState| { 
+                let lock = app_state.target_dir.read().unwrap();
+                println!("Reading target_dir_textbox: {}", lock.as_str());
+                lock.to_string()
+            }, 
+            |app_state: &mut AppState, s: String| {
+                println!("Writing: {s}");
+                let mut lock = app_state.target_dir.write().unwrap();
+                *lock = s;
+            }));
     let target_dir_row = Flex::row()
         .with_child(target_dir_textbox)
         .with_child(open_target_dir_button)
@@ -325,10 +328,10 @@ fn main() {
         port = args[1].clone();
     }
 
-    let app_state_clone = Arc::new(app_state.clone());
+    let target_dir = Arc::clone(&app_state.target_dir);
 
     thread::spawn(move || {
-        start_tokio(app_state_clone, event_sink, port);
+        start_tokio(&target_dir, event_sink, port);
     });
 
     launcher
@@ -339,7 +342,7 @@ fn main() {
 }
 
 #[tokio::main]
-async fn start_tokio(app_state: Arc<AppState>, sink: ExtEventSink, port: String) {
+async fn start_tokio(target_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
     let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
         .await
         .unwrap();
@@ -353,7 +356,7 @@ async fn start_tokio(app_state: Arc<AppState>, sink: ExtEventSink, port: String)
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
-        if let Err(error) = process_incoming(app_state.clone(), sink_clone, &mut socket).await {
+        if let Err(error) = process_incoming(target_dir, sink_clone, &mut socket).await {
             eprintln!("Error while processing incoming client: {}", error);
         }
     }
