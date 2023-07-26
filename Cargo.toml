@@ -14,7 +14,7 @@ codegen-units = 1
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 druid = { version = "0.8.3", features=["im"] }
-# druid-derive = "0.5.1"
+tray-item = "0.8.0"
 walkdir = "2"
 msgpacker = "0.4.3"
 searchlight = "0.3.1"
@@ -23,3 +23,6 @@ local-ip-address = "0.5.2"
 human_bytes = "0.4.2"
 clipboard = "0.5.0"
 home = "0.5.5"
+
+[build-dependencies]
+windres = "*"

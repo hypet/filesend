@@ -10,6 +10,7 @@ Application has functionality to choose a file and send it over network to anoth
 use druid::im::{Vector, HashSet};
 use druid::lens::Identity;
 use home::home_dir;
+use tray_item::{TrayItem, IconSource};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -341,12 +342,28 @@ fn main() {
         .expect("Failed to launch application");
 }
 
+fn set_icon() -> TrayItem {
+    let mut tray = TrayItem::new(
+        "File Transfer",
+        IconSource::Resource("exe-icon"),
+    ).unwrap();
+
+    tray.add_label("File Transfer").unwrap();
+    tray.add_menu_item("Hello", || {
+        println!("Hello!");
+    }).unwrap();
+
+    tray.set_icon(IconSource::Resource("exe-icon")).unwrap();
+    tray
+}
+
 #[tokio::main]
 async fn start_tokio(target_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
     let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
         .await
         .unwrap();
 
+    let _tray = set_icon();
     let port = listener.local_addr().unwrap().port();
     let sink_clone = sink.clone();
     thread::spawn(move || {
