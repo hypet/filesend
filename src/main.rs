@@ -37,9 +37,9 @@ mod autodiscovery;
 mod networking;
 
 const RANDOM_PORT: u16 = 0;
-const SET_CURRENT_TARGET: Selector<TargetPeer> = Selector::new("set_current_target_val_fn");
+const SET_CURRENT_PEER: Selector<TargetPeer> = Selector::new("set_current_target_val_fn");
 const ACCEPT_OPEN_FILE_TO_SEND: Selector<FileInfo> = Selector::new("accept_file_to_send");
-const ACCEPT_OPEN_TARGET_DIR: Selector<FileInfo> = Selector::new("accept_target_dir");
+const ACCEPT_OPEN_DOWNLOAD_DIR: Selector<FileInfo> = Selector::new("accept_download_dir");
 const DEFAULT_RCV_DIR: [&str; 2] = ["Downloads", "filesend"];
 
 const GUI_TEXT_SIZE: f64 = 14.0;
@@ -77,7 +77,7 @@ struct AppState {
     target_list: HashSet<TargetPeer>, // Address list of available receivers
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
-    target_dir: ArcRwLock,
+    download_dir: ArcRwLock,
 }
 
 impl AppState {
@@ -94,7 +94,7 @@ impl AppState {
             target_list: HashSet::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
-            target_dir: Arc::from(RwLock::from(
+            download_dir: Arc::from(RwLock::from(
                 create_receiving_dir_if_needed()
                     .to_str()
                     .unwrap()
@@ -118,8 +118,8 @@ impl AppDelegate<AppState> for Delegate {
         if let Some(file_info) = cmd.get(ACCEPT_OPEN_FILE_TO_SEND) {
             app_state.file_name = file_info.path().to_str().unwrap().into();
             return Handled::Yes;
-        } else if let Some(dir_info) = cmd.get(ACCEPT_OPEN_TARGET_DIR) {
-            let mut lock = app_state.target_dir.write().unwrap();
+        } else if let Some(dir_info) = cmd.get(ACCEPT_OPEN_DOWNLOAD_DIR) {
+            let mut lock = app_state.download_dir.write().unwrap();
             *lock = dir_info.path().to_str().unwrap().to_string();
             return Handled::Yes;
         } else if let Some(address) = cmd.get(TARGET_PEER_ADD_VAL_FN) {
@@ -128,7 +128,7 @@ impl AppDelegate<AppState> for Delegate {
         } else if let Some(address) = cmd.get(TARGET_PEER_REMOVE_VAL_FN) {
             app_state.target_list.remove(address);
             return Handled::Yes;
-        } else if let Some(address) = cmd.get(SET_CURRENT_TARGET) {
+        } else if let Some(address) = cmd.get(SET_CURRENT_PEER) {
             app_state.host = address.ip.clone();
             app_state.port = address.port.to_string();
             return Handled::Yes;
@@ -176,38 +176,38 @@ fn build_gui() -> impl Widget<AppState> {
         .with_child(open_file_button)
         .expand_width();
 
-    // Target dir
-    let target_dir_open_dialog_options = FileDialogOptions::new()
+    // Download dir
+    let download_dir_open_dialog_options = FileDialogOptions::new()
         .select_directories()
-        .accept_command(ACCEPT_OPEN_TARGET_DIR)
+        .accept_command(ACCEPT_OPEN_DOWNLOAD_DIR)
         .name_label("Files or dirs to send")
         .title("Files or dirs to send")
         .button_text("Open");
-    let open_target_dir_button = Button::new("Open").on_click(move |ctx, _, _| {
+    let open_download_dir_button = Button::new("Open").on_click(move |ctx, _, _| {
         ctx.submit_command(
-            druid::commands::SHOW_OPEN_PANEL.with(target_dir_open_dialog_options.clone()),
+            druid::commands::SHOW_OPEN_PANEL.with(download_dir_open_dialog_options.clone()),
         )
     });
-    let target_dir_textbox = TextBox::new()
-        .with_placeholder("Target Directory")
+    let download_dir_textbox = TextBox::new()
+        .with_placeholder("Download Directory")
         .with_text_size(GUI_TEXT_SIZE)
         .fix_width(320.0)
         .align_left()
         .lens(Identity.map(
             |app_state: &AppState| {
-                let lock = app_state.target_dir.read().unwrap();
-                println!("Reading target_dir_textbox: {}", lock.as_str());
+                let lock = app_state.download_dir.read().unwrap();
+                println!("Reading download_dir_textbox: {}", lock.as_str());
                 lock.to_string()
             },
             |app_state: &mut AppState, s: String| {
                 println!("Writing: {s}");
-                let mut lock = app_state.target_dir.write().unwrap();
+                let mut lock = app_state.download_dir.write().unwrap();
                 *lock = s;
             },
         ));
-    let target_dir_row = Flex::row()
-        .with_child(target_dir_textbox)
-        .with_child(open_target_dir_button)
+    let download_dir_row = Flex::row()
+        .with_child(download_dir_textbox)
+        .with_child(open_download_dir_button)
         .expand_width();
 
     // Host and port
@@ -279,7 +279,7 @@ fn build_gui() -> impl Widget<AppState> {
     let main_column = Flex::column()
         .with_child(file_row)
         .with_spacer(5.0)
-        .with_child(target_dir_row)
+        .with_child(download_dir_row)
         .with_spacer(10.0)
         .with_child(address_row)
         .with_spacer(10.0)
@@ -321,7 +321,7 @@ fn build_target_peer_item() -> impl Widget<TargetPeer> {
             ))
             .on_click(|ctx: &mut EventCtx, data: &mut TargetPeer, _| {
                 ctx.get_external_handle()
-                    .submit_command(SET_CURRENT_TARGET, data.clone(), Target::Auto)
+                    .submit_command(SET_CURRENT_PEER, data.clone(), Target::Auto)
                     .expect("command failed to submit");
             })
             .fix_width(180.0),
@@ -348,10 +348,10 @@ fn main() {
         port = args[1].clone();
     }
 
-    let target_dir = Arc::clone(&app_state.target_dir);
+    let download_dir = Arc::clone(&app_state.download_dir);
 
     thread::spawn(move || {
-        start_tokio(&target_dir, event_sink, port);
+        start_tokio(&download_dir, event_sink, port);
     });
 
     launcher
@@ -375,7 +375,7 @@ fn set_icon() -> TrayItem {
 }
 
 #[tokio::main]
-async fn start_tokio(target_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
+async fn start_tokio(download_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
     let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
         .await
         .unwrap();
@@ -390,7 +390,7 @@ async fn start_tokio(target_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
     loop {
         let (socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
-        let mut receiver = Receiver::new(target_dir.clone(), sink_clone, socket);
+        let mut receiver = Receiver::new(download_dir.clone(), sink_clone, socket);
         if let Err(error) = receiver.process_incoming().await {
             eprintln!("Error while processing incoming client: {}", error);
         }
