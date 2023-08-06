@@ -64,144 +64,157 @@ pub struct TextMeta {
 
 //////// Receiving part
 
-pub(crate) async fn process_incoming(target_dir: &ArcRwLock, sink: ExtEventSink, socket: &mut TcpStream) -> io::Result<()> {
-    loop {
-        println!("process_incoming");
-        handle_msg_pack(target_dir, socket, &sink).await?;
-    }
+pub struct Receiver {
+    target_dir: ArcRwLock,
+    sink: ExtEventSink,
+    socket: TcpStream,
 }
 
-async fn handle_msg_pack(target_dir: &ArcRwLock, socket: &mut TcpStream, sink: &ExtEventSink) -> io::Result<()> {
-    let msg_size = socket.read_u64().await?;
-    let msg_type = socket.read_u8().await?;
-    println!("msg_size: {}, msg_type: {}", msg_size, msg_type);
+impl Receiver {
+    pub fn new(target_dir: ArcRwLock, sink: ExtEventSink, socket: TcpStream) -> Receiver {
+        Receiver { target_dir, sink, socket }
+    }
 
-    match DataType::from_u8(msg_type) {
-        Some(DataType::File) => {
-            handle_file(target_dir, sink.clone(), socket, msg_size).await?;
-        }
-        Some(DataType::Directory) => {
-            handle_dir(target_dir, socket, msg_size).await?;
-        }
-        Some(DataType::TextBuffer) => {
-            handle_text_buf(socket, msg_size).await?;
-        }
-        None => {
-            eprintln!("< DataType is None");
+    pub async fn process_incoming(&mut self) -> io::Result<()> {
+        loop {
+            println!("process_incoming");
+            self.handle_msg_pack().await?;
         }
     }
-    Ok(())
-}
 
-async fn handle_file(target_dir: &ArcRwLock, sink: ExtEventSink, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    let mut buf = vec![0u8; msg_size as usize];
-    socket.read_exact(&mut buf).await?;
-    let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
-    println!("< Decoded {} bytes for msgPack", bytes);
-
-    let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
-
-    println!(
-        "< Receiving file: {:?} ({} bytes)",
-        relative_path, msg_file.file_size
-    );
-    sink.submit_command(
-        TRANSMITTITNG_FILENAME_VAL_FN,
-        Box::new(String::from(relative_path.to_str().unwrap())),
-        Target::Auto,
-    )
-    .expect("command failed to submit");
-
-    let read_lock = target_dir.read().unwrap();
-    let target_dir: String = read_lock.to_string();
-    println!("target_dir: {}", &target_dir);
-    let mut file = File::create(PathBuf::new().join(PathBuf::from(target_dir)).join(relative_path)).unwrap();
-    let mut total_received: u64 = 0;
-    let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
-    let file_size = msg_file.file_size;
-    let mut last_update = Instant::now();
-
-    if file_size < TRANSMITTING_BUF_SIZE as u64 {
-        let mut buf = vec![0u8; file_size as usize];
-        let read_bytes = socket.read_exact(&mut buf).await?;
-        if read_bytes == 0 {
-            eprintln!("< Can't read data");
+    pub async fn handle_msg_pack(&mut self) -> io::Result<()> {
+        let msg_size = self.socket.read_u64().await?;
+        let msg_type = self.socket.read_u8().await?;
+        println!("msg_size: {}, msg_type: {}", msg_size, msg_type);
+    
+        match DataType::from_u8(msg_type) {
+            Some(DataType::File) => {
+                self.handle_file(msg_size).await?;
+            }
+            Some(DataType::Directory) => {
+                self.handle_dir(msg_size).await?;
+            }
+            Some(DataType::TextBuffer) => {
+                self.handle_text_buf(msg_size).await?;
+            }
+            None => {
+                eprintln!("< DataType is None");
+            }
         }
-        total_received += read_bytes as u64;
-        file.write_all(&buf).unwrap();
+        Ok(())
+    }
 
-        update_progress_incoming(&sink, 1.0);
-    } else {
-        let mut counter: u32 = 0;
-        while total_received < file_size {
-            let read_bytes = socket.read_exact(&mut buf).await?;
+    async fn handle_file(&mut self, msg_size: u64) -> io::Result<()> {
+        let mut buf = vec![0u8; msg_size as usize];
+        self.socket.read_exact(&mut buf).await?;
+        let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
+        println!("< Decoded {} bytes for msgPack", bytes);
+    
+        let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
+    
+        println!(
+            "< Receiving file: {:?} ({} bytes)",
+            relative_path, msg_file.file_size
+        );
+        self.sink.submit_command(
+            TRANSMITTITNG_FILENAME_VAL_FN,
+            Box::new(String::from(relative_path.to_str().unwrap())),
+            Target::Auto,
+        )
+        .expect("command failed to submit");
+    
+        let read_lock = self.target_dir.read().unwrap();
+        let target_dir: String = read_lock.to_string();
+        println!("target_dir: {}", &target_dir);
+        let mut file = File::create(PathBuf::new().join(PathBuf::from(target_dir)).join(relative_path)).unwrap();
+        let mut total_received: u64 = 0;
+        let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
+        let file_size = msg_file.file_size;
+        let mut last_update = Instant::now();
+    
+        if file_size < TRANSMITTING_BUF_SIZE as u64 {
+            let mut buf = vec![0u8; file_size as usize];
+            let read_bytes = self.socket.read_exact(&mut buf).await?;
             if read_bytes == 0 {
                 eprintln!("< Can't read data");
-                break;
             }
             total_received += read_bytes as u64;
-            file.write_all(&buf)?;
-
-            let bytes_left: i128 = file_size as i128 - total_received as i128;
-            if bytes_left > 0 && bytes_left < TRANSMITTING_BUF_SIZE as i128 {
-                let mut buf = vec![0u8; (file_size - total_received) as usize];
-                let n = socket.read_exact(&mut buf).await?;
-                file.write_all(&buf).unwrap();
-                total_received += n as u64;
-
-                update_progress_incoming(&sink, 1.0);
-                break;
+            file.write_all(&buf).unwrap();
+    
+            update_progress_incoming(&self.sink, 1.0);
+        } else {
+            let mut counter: u32 = 0;
+            while total_received < file_size {
+                let read_bytes = self.socket.read_exact(&mut buf).await?;
+                if read_bytes == 0 {
+                    eprintln!("< Can't read data");
+                    break;
+                }
+                total_received += read_bytes as u64;
+                file.write_all(&buf)?;
+    
+                let bytes_left: i128 = file_size as i128 - total_received as i128;
+                if bytes_left > 0 && bytes_left < TRANSMITTING_BUF_SIZE as i128 {
+                    let mut buf = vec![0u8; (file_size - total_received) as usize];
+                    let n = self.socket.read_exact(&mut buf).await?;
+                    file.write_all(&buf).unwrap();
+                    total_received += n as u64;
+    
+                    update_progress_incoming(&self.sink, 1.0);
+                    break;
+                }
+    
+                counter += 1;
+                let percentage = total_received as f64 / file_size as f64;
+    
+                if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
+                    update_progress_incoming(&self.sink, percentage);
+                    counter = 0;
+                    last_update = Instant::now();
+                }
             }
-
-            counter += 1;
-            let percentage = total_received as f64 / file_size as f64;
-
-            if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
-                update_progress_incoming(&sink, percentage);
-                counter = 0;
-                last_update = Instant::now();
-            }
+            update_progress_incoming(&self.sink, 1.0);
         }
-        update_progress_incoming(&sink, 1.0);
-    }
-    println!("< Received {} bytes", total_received);
-
-    Ok(())
-}
-
-async fn handle_dir(target_dir: &ArcRwLock, socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    let mut buf = vec![0u8; msg_size as usize];
-    socket.read_exact(&mut buf).await?;
-    let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
-    println!("Decoded {} bytes for msgPack", bytes);
-
-    let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
-
-    println!("< Received dir: {:?}", relative_path);
-    let read_lock = target_dir.read().unwrap();
-    let target_dir: String = read_lock.to_string();
-    println!("target_dir: {}", &target_dir);
-    fs::create_dir_all(PathBuf::from(target_dir).join(relative_path).as_path()).unwrap();
-
-    Ok(())
-}
-
-async fn handle_text_buf(socket: &mut TcpStream, msg_size: u64) -> io::Result<()> {
-    let mut buf = vec![0u8; msg_size as usize];
-    socket.read_exact(&mut buf).await?;
-    let (bytes, msg_text) = TextMeta::unpack(&buf).unwrap();
-    println!("Decoded {} bytes for msgPack", bytes);
-
-    println!("< Received text_buf: {:?}", msg_text.data);
-
-    let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
-    match ctx.set_contents(msg_text.data) {
-        Ok(_) => {},
-        Err(e) => eprintln!("Error while setting clipboard content: {}", e),
+        println!("< Received {} bytes", total_received);
+    
+        Ok(())
     }
 
-    Ok(())
+    async fn handle_dir(&mut self, msg_size: u64) -> io::Result<()> {
+        let mut buf = vec![0u8; msg_size as usize];
+        self.socket.read_exact(&mut buf).await?;
+        let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
+        println!("Decoded {} bytes for msgPack", bytes);
+    
+        let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
+    
+        println!("< Received dir: {:?}", relative_path);
+        let read_lock = self.target_dir.read().unwrap();
+        let target_dir: String = read_lock.to_string();
+        println!("target_dir: {}", &target_dir);
+        fs::create_dir_all(PathBuf::from(target_dir).join(relative_path).as_path()).unwrap();
+    
+        Ok(())
+    }
+
+    async fn handle_text_buf(&mut self, msg_size: u64) -> io::Result<()> {
+        let mut buf = vec![0u8; msg_size as usize];
+        self.socket.read_exact(&mut buf).await?;
+        let (bytes, msg_text) = TextMeta::unpack(&buf).unwrap();
+        println!("Decoded {} bytes for msgPack", bytes);
+    
+        println!("< Received text_buf: {:?}", msg_text.data);
+    
+        let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
+        match ctx.set_contents(msg_text.data) {
+            Ok(_) => {},
+            Err(e) => eprintln!("Error while setting clipboard content: {}", e),
+        }
+    
+        Ok(())
+    }
 }
+
 
 //////// Sending part
 

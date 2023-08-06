@@ -24,13 +24,13 @@ use tokio::runtime::{Builder, Runtime};
 
 use autodiscovery::TARGET_PEER_ADD_VAL_FN;
 use autodiscovery::TARGET_PEER_REMOVE_VAL_FN;
-use networking::ArcRwLock;
+use networking::{ArcRwLock, Receiver};
 use networking::send;
 use networking::send_clipboard;
 use networking::PROGRESSBAR_DTR_VAL_FN;
 use networking::PROGRESSBAR_VAL_FN;
 use networking::TRANSMITTITNG_FILENAME_VAL_FN;
-use networking::{process_incoming, switch_transfer_state};
+use networking::switch_transfer_state;
 
 mod autodiscovery;
 mod networking;
@@ -371,9 +371,10 @@ async fn start_tokio(target_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
     });
 
     loop {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
-        if let Err(error) = process_incoming(target_dir, sink_clone, &mut socket).await {
+        let mut receiver = Receiver::new(target_dir.clone(), sink_clone, socket);
+        if let Err(error) = receiver.process_incoming().await {
             eprintln!("Error while processing incoming client: {}", error);
         }
     }
