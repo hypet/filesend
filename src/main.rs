@@ -1,16 +1,18 @@
+/*
+GUI Windows-compatible application written in Rust with druid.
+Application has functionality to choose a file and send it over network to another computer.
+*/
+
 // #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::{cmp, env, fs, hash, thread};
-/*
-GUI Windows-compatible application written in Rust with druid.
-Application has functionality to choose a file and send it over network to another computer.
-*/
 use druid::im::{HashSet, Vector};
 use druid::lens::Identity;
 use home::home_dir;
-use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::watch::{Sender, self, Receiver};
+use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tray_item::{IconSource, TrayItem};
 
@@ -18,7 +20,7 @@ use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, Scroll, T
 use druid::{
     AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, EventCtx, ExtEventSink,
     FileDialogOptions, FileInfo, Handled, Lens, LensExt, Selector, Target, UnitPoint, Widget,
-    WidgetExt, WindowDesc,
+    WidgetExt, WindowDesc, Insets,
 };
 use human_bytes::human_bytes;
 use tokio::runtime::{Builder, Runtime};
@@ -31,7 +33,7 @@ use networking::switch_transfer_state;
 use networking::PROGRESSBAR_DTR_VAL_FN;
 use networking::PROGRESSBAR_VAL_FN;
 use networking::TRANSMITTITNG_FILENAME_VAL_FN;
-use networking::{ArcRwLock, Receiver};
+use networking::DataReceiver;
 
 mod autodiscovery;
 mod networking;
@@ -51,7 +53,7 @@ struct TargetPeer {
     port: u16,
 }
 
-// Assuming one running instance of the application we take into account IP only
+// IP address is taken into account, assuming one running instance of the application
 impl cmp::PartialEq for TargetPeer {
     fn eq(&self, other: &Self) -> bool {
         self.ip == other.ip
@@ -77,11 +79,15 @@ struct AppState {
     target_list: HashSet<TargetPeer>, // Address list of available receivers
     connections: Arc<Mutex<HashMap<String, TcpStream>>>,
     outgoing_file_processing: Arc<Mutex<bool>>,
-    download_dir: ArcRwLock,
+    download_dir: String,
+    download_dir_sender: Arc<Sender<String>>,
+    download_dir_rcvr: Arc<Receiver<String>>,
 }
 
 impl AppState {
     fn new() -> AppState {
+        let download_dir = create_receiving_dir_if_needed().to_str().unwrap().to_string();
+        let (download_dir_tx, download_dir_rx) = watch::channel(download_dir.clone());
         AppState {
             file_name: "".into(),
             host: "".into(),
@@ -94,12 +100,9 @@ impl AppState {
             target_list: HashSet::new(),
             connections: Arc::new(Mutex::from(HashMap::new())),
             outgoing_file_processing: Arc::new(Mutex::from(true)),
-            download_dir: Arc::from(RwLock::from(
-                create_receiving_dir_if_needed()
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-            )),
+            download_dir: download_dir,
+            download_dir_sender: Arc::from(download_dir_tx),
+            download_dir_rcvr: Arc::from(download_dir_rx),
         }
     }
 }
@@ -119,8 +122,11 @@ impl AppDelegate<AppState> for Delegate {
             app_state.file_name = file_info.path().to_str().unwrap().into();
             return Handled::Yes;
         } else if let Some(dir_info) = cmd.get(ACCEPT_OPEN_DOWNLOAD_DIR) {
-            let mut lock = app_state.download_dir.write().unwrap();
-            *lock = dir_info.path().to_str().unwrap().to_string();
+            app_state.download_dir = dir_info.path().to_str().unwrap().to_string();
+            match app_state.download_dir_sender.send(app_state.download_dir.clone()) {
+                Ok(_) => {},
+                Err(e) => eprintln!("Error while sending download_dir value: {}", e),
+            }
             return Handled::Yes;
         } else if let Some(address) = cmd.get(TARGET_PEER_ADD_VAL_FN) {
             app_state.target_list.insert((*address).clone());
@@ -161,7 +167,7 @@ fn build_gui() -> impl Widget<AppState> {
         .title("Files or dirs to send")
         .button_text("Open");
     let file_name_textbox = TextBox::new()
-        .with_placeholder("File or Directory name")
+        .with_placeholder("File or Directory to send")
         .with_text_size(GUI_TEXT_SIZE)
         .fix_width(320.0)
         .align_left()
@@ -188,25 +194,15 @@ fn build_gui() -> impl Widget<AppState> {
             druid::commands::SHOW_OPEN_PANEL.with(download_dir_open_dialog_options.clone()),
         )
     });
-    let download_dir_textbox = TextBox::new()
-        .with_placeholder("Download Directory")
+
+    let download_dir_label = Label::new(|data: &AppState, _: &_| data.download_dir.clone())
+        .with_line_break_mode(LineBreaking::WordWrap)
         .with_text_size(GUI_TEXT_SIZE)
         .fix_width(320.0)
-        .align_left()
-        .lens(Identity.map(
-            |app_state: &AppState| {
-                let lock = app_state.download_dir.read().unwrap();
-                println!("Reading download_dir_textbox: {}", lock.as_str());
-                lock.to_string()
-            },
-            |app_state: &mut AppState, s: String| {
-                println!("Writing: {s}");
-                let mut lock = app_state.download_dir.write().unwrap();
-                *lock = s;
-            },
-        ));
+        .align_left();
+
     let download_dir_row = Flex::row()
-        .with_child(download_dir_textbox)
+        .with_child(download_dir_label)
         .with_child(open_download_dir_button)
         .expand_width();
 
@@ -260,6 +256,7 @@ fn build_gui() -> impl Widget<AppState> {
         .with_text_size(GUI_TEXT_SIZE)
         .fix_width(400.0)
         .fix_height(45.0)
+        .align_vertical(UnitPoint::BOTTOM)
         .center();
     let progress_bar = ProgressBar::new()
         .lens(AppState::progress)
@@ -290,6 +287,7 @@ fn build_gui() -> impl Widget<AppState> {
         .with_child(progress_bar)
         .with_spacer(10.0)
         .with_child(progress_row)
+        .padding(Insets::uniform_xy(5.0, 5.0))
         .fix_width(400.0);
 
     let target_list = Flex::column()
@@ -348,10 +346,9 @@ fn main() {
         port = args[1].clone();
     }
 
-    let download_dir = Arc::clone(&app_state.download_dir);
-
+    let download_dir_rcvr = Arc::clone(&app_state.download_dir_rcvr);
     thread::spawn(move || {
-        start_tokio(&download_dir, event_sink, port);
+        start_tokio(download_dir_rcvr, event_sink, &port);
     });
 
     launcher
@@ -375,7 +372,7 @@ fn set_icon() -> TrayItem {
 }
 
 #[tokio::main]
-async fn start_tokio(download_dir: &ArcRwLock, sink: ExtEventSink, port: String) {
+async fn start_tokio(download_dir: Arc<Receiver<String>>, sink: ExtEventSink, port: &str) {
     let listener = TcpListener::bind(format!("{}:{}", "0.0.0.0", port))
         .await
         .unwrap();
@@ -390,7 +387,8 @@ async fn start_tokio(download_dir: &ArcRwLock, sink: ExtEventSink, port: String)
     loop {
         let (socket, _) = listener.accept().await.unwrap();
         let sink_clone = sink.clone();
-        let mut receiver = Receiver::new(download_dir.clone(), sink_clone, socket);
+        let download_dir_rcvr_clone = download_dir.clone();
+        let mut receiver = DataReceiver::new(download_dir_rcvr_clone, sink_clone, socket);
         if let Err(error) = receiver.process_incoming().await {
             eprintln!("Error while processing incoming client: {}", error);
         }

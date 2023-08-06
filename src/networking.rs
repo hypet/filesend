@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -13,6 +13,7 @@ use msgpacker::prelude::*;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use tokio::sync::watch::Receiver;
 use walkdir::WalkDir;
 
 use crate::AppState;
@@ -23,8 +24,6 @@ pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> = Selector::new
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 const UPDATE_DTR_PERIOD_MS: u128 = 1000;
 const TRANSMITTING_BUF_SIZE: usize = 1024;
-
-pub(crate) type ArcRwLock = Arc<RwLock<String>>;
 
 pub enum DataType {
     File,
@@ -64,20 +63,20 @@ pub struct TextMeta {
 
 //////// Receiving part
 
-pub struct Receiver {
-    target_dir: ArcRwLock,
+pub struct DataReceiver {
+    download_dir: String,
     sink: ExtEventSink,
     socket: TcpStream,
 }
 
-impl Receiver {
-    pub fn new(target_dir: ArcRwLock, sink: ExtEventSink, socket: TcpStream) -> Receiver {
-        Receiver { target_dir, sink, socket }
+impl DataReceiver {
+    pub fn new(download_dir_rcvr: Arc<Receiver<String>>, sink: ExtEventSink, socket: TcpStream) -> DataReceiver {
+        let download_dir = download_dir_rcvr.borrow().clone();
+        DataReceiver { download_dir, sink, socket }
     }
 
     pub async fn process_incoming(&mut self) -> io::Result<()> {
         loop {
-            println!("process_incoming");
             self.handle_msg_pack().await?;
         }
     }
@@ -123,10 +122,8 @@ impl Receiver {
         )
         .expect("command failed to submit");
     
-        let read_lock = self.target_dir.read().unwrap();
-        let target_dir: String = read_lock.to_string();
-        println!("target_dir: {}", &target_dir);
-        let mut file = File::create(PathBuf::new().join(PathBuf::from(target_dir)).join(relative_path)).unwrap();
+        println!("< download_dir: {}", self.download_dir);
+        let mut file = File::create(PathBuf::new().join(PathBuf::from(&self.download_dir)).join(relative_path)).unwrap();
         let mut total_received: u64 = 0;
         let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
         let file_size = msg_file.file_size;
@@ -184,15 +181,13 @@ impl Receiver {
         let mut buf = vec![0u8; msg_size as usize];
         self.socket.read_exact(&mut buf).await?;
         let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
-        println!("Decoded {} bytes for msgPack", bytes);
+        println!("< Decoded {} bytes for msgPack", bytes);
     
         let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
     
         println!("< Received dir: {:?}", relative_path);
-        let read_lock = self.target_dir.read().unwrap();
-        let target_dir: String = read_lock.to_string();
-        println!("target_dir: {}", &target_dir);
-        fs::create_dir_all(PathBuf::from(target_dir).join(relative_path).as_path()).unwrap();
+        println!("< download_dir: {}", &self.download_dir);
+        fs::create_dir_all(PathBuf::from(&self.download_dir).join(relative_path).as_path()).unwrap();
     
         Ok(())
     }
@@ -201,7 +196,7 @@ impl Receiver {
         let mut buf = vec![0u8; msg_size as usize];
         self.socket.read_exact(&mut buf).await?;
         let (bytes, msg_text) = TextMeta::unpack(&buf).unwrap();
-        println!("Decoded {} bytes for msgPack", bytes);
+        println!("< Decoded {} bytes for msgPack", bytes);
     
         println!("< Received text_buf: {:?}", msg_text.data);
     
@@ -219,19 +214,19 @@ impl Receiver {
 //////// Sending part
 
 // For transmit pausing purpose
-pub(crate) fn switch_transfer_state(target_dir: &mut AppState, val: bool) {
-    let mut outgoing_flag = target_dir.outgoing_file_processing.lock().unwrap();
+pub(crate) fn switch_transfer_state(download_dir: &mut AppState, val: bool) {
+    let mut outgoing_flag = download_dir.outgoing_file_processing.lock().unwrap();
     *outgoing_flag = val;
 }
 
-pub(crate) fn send_clipboard(target_dir: &mut AppState) {
+pub(crate) fn send_clipboard(download_dir: &mut AppState) {
     let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
     match ctx.get_contents() {
         Ok(content) => {
-            println!("Clipboard content: {}", content);
-            let host = target_dir.host.clone();
-            let port = target_dir.port.clone();
-            let rt = target_dir.rt.clone();
+            println!("> Clipboard content: {}", content);
+            let host = download_dir.host.clone();
+            let port = download_dir.port.clone();
+            let rt = download_dir.rt.clone();
 
             thread::spawn(move || {
                 rt.block_on(async move {
@@ -239,7 +234,7 @@ pub(crate) fn send_clipboard(target_dir: &mut AppState) {
                         Ok(_) => {},
                         Err(e) => eprintln!("Error while sending clipboard: {}", e),
                     }
-                    println!("Clipboard sender thread died");
+                    println!("> Clipboard sender thread has died");
                 });
             });
         }
@@ -274,24 +269,24 @@ async fn send_clipboard_inner(
     Ok(())
 }
 
-pub(crate) fn send(target_dir: &mut AppState, sink: ExtEventSink) {
-    switch_transfer_state(target_dir, true);
-    let path = target_dir.file_name.clone();
-    let host = target_dir.host.clone();
-    let port = target_dir.port.clone();
+pub(crate) fn send(download_dir: &mut AppState, sink: ExtEventSink) {
+    switch_transfer_state(download_dir, true);
+    let path = download_dir.file_name.clone();
+    let host = download_dir.host.clone();
+    let port = download_dir.port.clone();
 
-    let rt = target_dir.rt.clone();
-    let mut target_dir = target_dir.clone();
+    let rt = download_dir.rt.clone();
+    let mut download_dir = download_dir.clone();
     thread::spawn(move || {
         rt.block_on(async move {
-            send_file(&mut target_dir, path, host, port, sink).await;
-            println!("Sender thread died");
+            send_file(&mut download_dir, path, host, port, sink).await;
+            println!("> Sender thread has died");
         });
     });
 }
 
 async fn send_file(
-    target_dir: &mut AppState,
+    download_dir: &mut AppState,
     path: String,
     host: String,
     port: String,
@@ -322,7 +317,7 @@ async fn send_file(
                 let mut full_path = PathBuf::from(path.clone());
                 full_path.push(entry.path().file_name().unwrap().to_str().unwrap());
                 match send_single_file(
-                    target_dir,
+                    download_dir,
                     &mut stream,
                     entry_full_path,
                     entry_path.to_path_buf(),
@@ -338,7 +333,7 @@ async fn send_file(
     } else {
         let entry_path = path.strip_prefix(path_parent).unwrap();
         match send_single_file(
-            target_dir,
+            download_dir,
             &mut stream,
             path.to_str().unwrap(),
             entry_path.to_path_buf(),
@@ -378,7 +373,7 @@ async fn send_single_dir(
 }
 
 async fn send_single_file(
-    target_dir: &mut AppState,
+    download_dir: &mut AppState,
     stream: &mut TcpStream,
     file_name: &str,
     relative_path: PathBuf,
@@ -425,7 +420,7 @@ async fn send_single_file(
 
     while let Ok(n) = file.read(&mut buf) {
         if iter_counter % 100 == 0 {
-            let outgoing_flag = target_dir.outgoing_file_processing.lock().unwrap();
+            let outgoing_flag = download_dir.outgoing_file_processing.lock().unwrap();
             if !*outgoing_flag {
                 break;
             }
@@ -482,8 +477,6 @@ fn path_to_vec(path: PathBuf) -> Vec<String> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::RwLock;
-
     use super::*;
 
     async fn setup() {}
@@ -497,13 +490,4 @@ mod test {
         // TODO complete test
     }
 
-    #[test]
-    fn test_arc() {
-        let a: ArcRwLock = Arc::from(RwLock::from("value_a".to_string()));
-        let b = Arc::clone(&a);
-        let mut lock = a.write().unwrap();
-        *lock = "value_b".to_string();
-        drop(lock);
-        assert_eq!(a.read().unwrap().as_str(), b.read().unwrap().as_str());
-    }
 }
