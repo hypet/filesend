@@ -318,7 +318,7 @@ fn main() {
     let app_state = AppState::new();
 
     let window = WindowDesc::new(build_gui())
-        .title("File Transfer")
+        .title(format!("File Transfer @ {}", hostname::get().unwrap().into_string().unwrap()))
         .window_size((600.0, 280.0));
 
     let launcher = AppLauncher::with_window(window);
