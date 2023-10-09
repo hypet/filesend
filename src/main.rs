@@ -30,7 +30,8 @@ use autodiscovery::TARGET_PEER_REMOVE_VAL_FN;
 use networking::send;
 use networking::send_clipboard;
 use networking::switch_transfer_state;
-use networking::PROGRESSBAR_DTR_VAL_FN;
+use networking::PROGRESSBAR_SEND_DTR_VAL_FN;
+use networking::PROGRESSBAR_RCVD_DTR_VAL_FN;
 use networking::PROGRESSBAR_VAL_FN;
 use networking::TRANSMITTITNG_FILENAME_VAL_FN;
 use networking::DataReceiver;
@@ -72,7 +73,8 @@ struct AppState {
     host: String,
     port: String,
     progress: f64,
-    dtr: String, // Data Transfer Rate
+    send_dtr: String, // Data Transfer Rate for sending
+    rcv_dtr: String, // Data Transfer Rate for receiving
     rt: Arc<Runtime>,
     incoming_file_name: String,
     incoming_file_size: u64,
@@ -93,7 +95,8 @@ impl AppState {
             host: "".into(),
             port: "".into(),
             progress: 0.0,
-            dtr: "".into(),
+            send_dtr: "".into(),
+            rcv_dtr: "".into(),
             rt: Arc::new(Builder::new_multi_thread().enable_all().build().unwrap()),
             incoming_file_name: "".into(),
             incoming_file_size: 0,
@@ -141,8 +144,17 @@ impl AppDelegate<AppState> for Delegate {
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             app_state.progress = *number;
             return Handled::Yes;
-        } else if let Some(dtr) = cmd.get(PROGRESSBAR_DTR_VAL_FN) {
-            app_state.dtr = if *dtr > 0 {
+        } else if let Some(dtr) = cmd.get(PROGRESSBAR_SEND_DTR_VAL_FN) {
+            app_state.send_dtr = if *dtr > 0 {
+                let mut dtr = human_bytes(*dtr);
+                dtr.push_str("/s");
+                dtr
+            } else {
+                "".into()
+            };
+            return Handled::Yes;
+        } else if let Some(dtr) = cmd.get(PROGRESSBAR_RCVD_DTR_VAL_FN) {
+            app_state.rcv_dtr = if *dtr > 0 {
                 let mut dtr = human_bytes(*dtr);
                 dtr.push_str("/s");
                 dtr
@@ -266,12 +278,16 @@ fn build_gui() -> impl Widget<AppState> {
     let progress_label = Label::new(|data: &AppState, _: &_| format!("{:.2}%", data.progress * 100.0))
         .with_text_size(GUI_TEXT_SIZE)
         .center();
-    let progress_speed = Label::new(|data: &AppState, _: &_| data.dtr.clone())
+    let progress_send_speed = Label::new(|data: &AppState, _: &_| data.send_dtr.clone())
+        .with_text_size(GUI_TEXT_SIZE)
+        .align_right();
+    let progress_rcv_speed = Label::new(|data: &AppState, _: &_| data.rcv_dtr.clone())
         .with_text_size(GUI_TEXT_SIZE)
         .align_right();
     let progress_row = Flex::row()
         .with_child(progress_label)
-        .with_child(progress_speed);
+        .with_child(progress_rcv_speed)
+        .with_child(progress_send_speed);
 
     let main_column = Flex::column()
         .with_child(file_row)

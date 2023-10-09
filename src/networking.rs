@@ -19,7 +19,8 @@ use walkdir::WalkDir;
 use crate::AppState;
 
 pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_val_fn");
-pub(crate) const PROGRESSBAR_DTR_VAL_FN: Selector<u32> = Selector::new("progressbar_dtr_val_fn");
+pub(crate) const PROGRESSBAR_SEND_DTR_VAL_FN: Selector<u32> = Selector::new("progressbar_send_dtr_val_fn");
+pub(crate) const PROGRESSBAR_RCVD_DTR_VAL_FN: Selector<u32> = Selector::new("progressbar_rcvd_dtr_val_fn");
 pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> = Selector::new("transmitting_filename_val_fn");
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 const UPDATE_DTR_PERIOD_MS: u128 = 1000;
@@ -132,7 +133,9 @@ impl DataReceiver {
         let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
         let file_size = msg_file.file_size;
         let mut last_update = Instant::now();
-    
+        let mut last_dtr_update = Instant::now();
+        let mut rcvd_bytes_per_second: u32 = 0;
+
         if file_size < TRANSMITTING_BUF_SIZE as u64 {
             let mut buf = vec![0u8; file_size as usize];
             let read_bytes = self.socket.read_exact(&mut buf).await?;
@@ -152,6 +155,7 @@ impl DataReceiver {
                     break;
                 }
                 total_received += read_bytes as u64;
+                rcvd_bytes_per_second += read_bytes as u32;
                 file.write_all(&buf)?;
     
                 let bytes_left: i128 = file_size as i128 - total_received as i128;
@@ -167,11 +171,17 @@ impl DataReceiver {
     
                 counter += 1;
                 let percentage = total_received as f64 / file_size as f64;
-    
+
                 if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
                     update_progress_incoming(&self.sink, percentage);
                     counter = 0;
                     last_update = Instant::now();
+                }
+
+                if last_dtr_update.elapsed().as_millis() >= UPDATE_DTR_PERIOD_MS {
+                    update_rcvd_dtr(&self.sink, rcvd_bytes_per_second);
+                    rcvd_bytes_per_second = 0;
+                    last_dtr_update = Instant::now();
                 }
             }
             update_progress_incoming(&self.sink, 1.0);
@@ -466,13 +476,13 @@ async fn send_single_file(
         sent_bytes_per_second += n as u32;
 
         if last_dtr_update.elapsed().as_millis() >= UPDATE_DTR_PERIOD_MS {
-            update_dtr(&sink, sent_bytes_per_second);
+            update_send_dtr(&sink, sent_bytes_per_second);
             last_dtr_update = Instant::now();
             sent_bytes_per_second = 0;
         }
     }
     update_progress_incoming(&sink, 1.0);
-    update_dtr(&sink, 0);
+    update_send_dtr(&sink, 0);
 
     Ok(())
 }
@@ -482,8 +492,13 @@ fn update_progress_incoming(sink: &ExtEventSink, value: f64) {
         .expect("command failed to submit");
 }
 
-fn update_dtr(sink: &ExtEventSink, value: u32) {
-    sink.submit_command(PROGRESSBAR_DTR_VAL_FN, value, Target::Auto)
+fn update_rcvd_dtr(sink: &ExtEventSink, value: u32) {
+    sink.submit_command(PROGRESSBAR_RCVD_DTR_VAL_FN, value, Target::Auto)
+        .expect("command failed to submit");
+}
+
+fn update_send_dtr(sink: &ExtEventSink, value: u32) {
+    sink.submit_command(PROGRESSBAR_SEND_DTR_VAL_FN, value, Target::Auto)
         .expect("command failed to submit");
 }
 
