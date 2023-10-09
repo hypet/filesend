@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Write, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -9,11 +9,11 @@ use clipboard::ClipboardContext;
 use clipboard::ClipboardProvider;
 
 use druid::{ExtEventSink, Selector, Target};
-use msgpacker::prelude::*;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-
 use tokio::sync::watch::Receiver;
+use serde::{Deserialize, Serialize};
+use rmp_serde::{Deserializer, Serializer};
 use walkdir::WalkDir;
 
 use crate::AppState;
@@ -50,13 +50,13 @@ impl DataType {
     }
 }
 
-#[derive(MsgPacker)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct FileMeta {
     pub file_relative_path: Vec<String>,
     pub file_size: u64,
 }
 
-#[derive(MsgPacker)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct TextMeta {
     pub data: String,
 }
@@ -106,8 +106,12 @@ impl DataReceiver {
     async fn handle_file(&mut self, msg_size: u64) -> io::Result<()> {
         let mut buf = vec![0u8; msg_size as usize];
         self.socket.read_exact(&mut buf).await?;
-        let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
-        println!("< Decoded {} bytes for msgPack", bytes);
+
+        let cur = Cursor::new(&buf[..]);
+        let mut de = Deserializer::new(cur);
+        let msg_file: FileMeta = Deserialize::deserialize(&mut de).unwrap();
+
+        println!("< Decoded {:?}", &msg_file);
     
         let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
     
@@ -180,8 +184,10 @@ impl DataReceiver {
     async fn handle_dir(&mut self, msg_size: u64) -> io::Result<()> {
         let mut buf = vec![0u8; msg_size as usize];
         self.socket.read_exact(&mut buf).await?;
-        let (bytes, msg_file) = FileMeta::unpack(&buf).unwrap();
-        println!("< Decoded {} bytes for msgPack", bytes);
+        let cur = Cursor::new(&buf[..]);
+        let mut de = Deserializer::new(cur);
+        let msg_file: FileMeta = Deserialize::deserialize(&mut de).unwrap();
+        println!("< Decoded {:?}", &msg_file);
     
         let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
     
@@ -195,9 +201,10 @@ impl DataReceiver {
     async fn handle_text_buf(&mut self, msg_size: u64) -> io::Result<()> {
         let mut buf = vec![0u8; msg_size as usize];
         self.socket.read_exact(&mut buf).await?;
-        let (bytes, msg_text) = TextMeta::unpack(&buf).unwrap();
-        println!("< Decoded {} bytes for msgPack", bytes);
-    
+        let cur = Cursor::new(&buf[..]);
+        let mut de = Deserializer::new(cur);
+        let msg_text: TextMeta = Deserialize::deserialize(&mut de).unwrap();
+
         println!("< Received text_buf: {:?}", msg_text.data);
     
         let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
@@ -257,13 +264,16 @@ async fn send_clipboard_inner(
         data: content
     };
     let mut buf = Vec::new();
-    let msg_size = data.pack(&mut buf);
-
-    stream.write_u64(msg_size as u64).await?;
-    stream.write_u8(DataType::TextBuffer.to_u8()).await?;
-    let bytes = stream.write(&buf).await?;
-    if bytes < buf.len() {
-        eprintln!("Bytes written is less than buffer len")
+    match data.serialize(&mut Serializer::new(&mut buf)) {
+        Ok(_) => {
+            stream.write_u64(buf.len() as u64).await?;
+            stream.write_u8(DataType::TextBuffer.to_u8()).await?;
+            let bytes = stream.write(&buf).await?;
+            if bytes < buf.len() {
+                eprintln!("Bytes written is less than buffer len")
+            }
+        },
+        Err(e) => eprintln!("Error while serializing clipboard content: {}", e),
     }
 
     Ok(())
@@ -359,15 +369,18 @@ async fn send_single_dir(
     };
 
     let mut buf = Vec::new();
-    let msg_size = data.pack(&mut buf);
-
-    stream.write_u64(msg_size as u64).await?;
-    stream.write_u8(DataType::Directory.to_u8()).await?;
-    let bytes = stream.write(&buf).await?;
-    if bytes < buf.len() {
-        eprintln!("Bytes written is less than buffer len")
+    match data.serialize(&mut Serializer::new(&mut buf)) {
+        Ok(_) => {
+            stream.write_u64(buf.len() as u64).await?;
+            stream.write_u8(DataType::Directory.to_u8()).await?;
+            let bytes = stream.write(&buf).await?;
+            if bytes < buf.len() {
+                eprintln!("Bytes written is less than buffer len")
+            }
+            update_progress_incoming(&sink, 1.0);
+        },
+        Err(e) => eprintln!("Error while serializing dir: {}", e),
     }
-    update_progress_incoming(&sink, 1.0);
 
     Ok(())
 }
@@ -401,15 +414,20 @@ async fn send_single_file(
     };
 
     let mut buf = Vec::new();
-    let msg_size = data.pack(&mut buf);
-    println!("Packed msg size: {}", msg_size);
-
-    stream.write_u64(msg_size as u64).await?;
-    stream.write_u8(DataType::File.to_u8()).await?;
-    let bytes = stream.write(&buf).await?;
-    if bytes < buf.len() {
-        eprintln!("Bytes written is less than buffer len")
+    match data.serialize(&mut Serializer::new(&mut buf)) {
+        Ok(_) => {
+            stream.write_u64(buf.len() as u64).await?;
+            stream.write_u8(DataType::File.to_u8()).await?;
+            let bytes = stream.write(&buf).await?;
+            if bytes < buf.len() {
+                eprintln!("Bytes written is less than buffer len")
+            }
+            update_progress_incoming(&sink, 1.0);
+        },
+        Err(e) => eprintln!("Error while serializing file: {}", e),
     }
+
+    println!("Packed msg size: {}", buf.len());
 
     let mut buf = [0; TRANSMITTING_BUF_SIZE];
     let mut total_sent: u64 = 0;
