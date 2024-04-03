@@ -369,6 +369,8 @@ fn build_target_peer_item() -> impl Widget<TargetPeerUi> {
 }
 
 fn main() {
+    simple_logger::init_with_level(log::Level::Info).unwrap();
+
     let args: Vec<String> = env::args().collect();
 
     let mut port: String = RANDOM_PORT.to_string();

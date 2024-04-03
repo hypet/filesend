@@ -1,5 +1,5 @@
 use local_ip_address::local_ip;
-use log::info;
+use log::{debug, info};
 use searchlight::{
 	broadcast::{BroadcasterBuilder, ServiceBuilder},
 	net::{IpVersion, TargetInterfaceV4, TargetInterfaceV6}, discovery::{DiscoveryBuilder, DiscoveryEvent}, dns::op::DnsResponse,
@@ -69,21 +69,21 @@ pub(crate) fn start(sink: Sender<AutodiscoveryEvent>, port: u16) {
 				DiscoveryEvent::ResponderFound(responder) => {
 					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
 					if let Some(a) = addr {
-						info!("New remote address: {:?}", a);
+						debug!("New remote address: {:?}", a);
 						update_target_peer(sink.clone(), a);
 					}
 				}
 				DiscoveryEvent::ResponderLost(responder) => {
 					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
 					if let Some(a) = addr {
-						info!("Removing address: {:?}", a);
+						debug!("Removing address: {:?}", a);
 						remove_target_peer(sink.clone(), a);
 					}
 				}
 				DiscoveryEvent::ResponseUpdate { old: _responder_old, new: responder_new } => {
 					let addr: Option<TargetPeer> = get_target_address(&responder_new.last_response, &local_ip);
 					if let Some(a) = addr {
-						info!("Update address: {:?}", a);
+						debug!("Update address: {:?}", a);
 						update_target_peer(sink.clone(), a);
 					}
 				}

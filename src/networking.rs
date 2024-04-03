@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 use serde::{Deserialize, Serialize};
 use rmp_serde::{Deserializer, Serializer};
 use tokio::runtime::Runtime;
+use tokio::sync::watch;
 use walkdir::WalkDir;
 
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
@@ -30,6 +31,7 @@ pub enum NetworkEvent {
     RcvDataRate(u32),
 }
 
+#[derive(Debug)]
 pub enum DataType {
     File,
     Directory,
@@ -75,7 +77,7 @@ pub struct DataReceiver {
 }
 
 impl DataReceiver {
-    pub fn new(download_dir_rcvr: Arc<tokio::sync::watch::Receiver<String>>, sink: Arc<SyncSender<NetworkEvent>>, socket: TcpStream) -> DataReceiver {
+    pub fn new(download_dir_rcvr: Arc<watch::Receiver<String>>, sink: Arc<SyncSender<NetworkEvent>>, socket: TcpStream) -> DataReceiver {
         let download_dir = download_dir_rcvr.borrow().clone();
         DataReceiver { download_dir, sender: sink, socket }
     }
@@ -88,10 +90,10 @@ impl DataReceiver {
 
     pub async fn handle_msg_pack(&mut self) -> io::Result<()> {
         let msg_size = self.socket.read_u64().await?;
-        let msg_type = self.socket.read_u8().await?;
-        info!("msg_size: {}, msg_type: {}", msg_size, msg_type);
+        let msg_type = DataType::from_u8(self.socket.read_u8().await?);
+        info!("msg_size: {}, msg_type: {:?}", msg_size, msg_type);
     
-        match DataType::from_u8(msg_type) {
+        match msg_type {
             Some(DataType::File) => {
                 self.handle_file(msg_size).await?;
             }
