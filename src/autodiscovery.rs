@@ -1,25 +1,47 @@
-use druid::{ExtEventSink, Selector, Target};
 use local_ip_address::local_ip;
+use log::info;
 use searchlight::{
 	broadcast::{BroadcasterBuilder, ServiceBuilder},
-	net::{IpVersion, TargetInterfaceV4, TargetInterfaceV6}, discovery::{DiscoveryBuilder, DiscoveryEvent}, dns::{op::DnsResponse},
+	net::{IpVersion, TargetInterfaceV4, TargetInterfaceV6}, discovery::{DiscoveryBuilder, DiscoveryEvent}, dns::op::DnsResponse,
 };
+use std::sync::mpsc::Sender;
 use std::{
-	net::{IpAddr, Ipv4Addr},
-	str,
-	str::FromStr, time::Duration,
+	cmp, hash, net::{IpAddr, Ipv4Addr}, str::{self, FromStr}, time::Duration
 };
 
-use crate::TargetPeer;
-
-pub(crate) const TARGET_PEER_ADD_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_add_val_fn");
-pub(crate) const TARGET_PEER_REMOVE_VAL_FN: Selector<TargetPeer> = Selector::new("target_peer_remove_val_fn");
 const SERVICE_TYPE: &str = "_filesend._tcp";
 
-pub(crate) fn start(sink: ExtEventSink, port: u16) {
+#[derive(Debug, Clone, Eq, PartialOrd, Ord)]
+pub(crate) struct TargetPeer {
+    pub hostname: String,
+    pub ip: String,
+    pub port: u16,
+}
+
+// IP address is taken into account, assuming one running instance of the application
+impl cmp::PartialEq for TargetPeer {
+    fn eq(&self, other: &Self) -> bool {
+        self.ip == other.ip
+    }
+}
+
+impl hash::Hash for TargetPeer {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.ip.hash(state);
+    }
+}
+
+
+#[derive(Clone)]
+pub enum AutodiscoveryEvent {
+	TargetPeerAdd(TargetPeer),
+	TargerPeerRemove(TargetPeer)
+}
+
+pub(crate) fn start(sink: Sender<AutodiscoveryEvent>, port: u16) {
 
 	let local_ip = local_ip().unwrap().to_string();
-    println!("Local address: {}:{}", local_ip, port);
+    info!("Local address: {}:{}", local_ip, port);
 
 	let _broadcaster = BroadcasterBuilder::new()
 		.interface_v4(TargetInterfaceV4::All)
@@ -47,22 +69,22 @@ pub(crate) fn start(sink: ExtEventSink, port: u16) {
 				DiscoveryEvent::ResponderFound(responder) => {
 					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
 					if let Some(a) = addr {
-						println!("New remote address: {:?}", a);
-						update_target_peer(&sink, a);
+						info!("New remote address: {:?}", a);
+						update_target_peer(sink.clone(), a);
 					}
 				}
 				DiscoveryEvent::ResponderLost(responder) => {
 					let addr: Option<TargetPeer> = get_target_address(&responder.last_response, &local_ip);
 					if let Some(a) = addr {
-						println!("Removing address: {:?}", a);
-						remove_target_peer(&sink, a);
+						info!("Removing address: {:?}", a);
+						remove_target_peer(sink.clone(), a);
 					}
 				}
 				DiscoveryEvent::ResponseUpdate { old: _responder_old, new: responder_new } => {
 					let addr: Option<TargetPeer> = get_target_address(&responder_new.last_response, &local_ip);
 					if let Some(a) = addr {
-						println!("Update address: {:?}", a);
-						update_target_peer(&sink, a);
+						info!("Update address: {:?}", a);
+						update_target_peer(sink.clone(), a);
 					}
 				}
 			}
@@ -112,12 +134,10 @@ fn get_target_address(dns_response: &DnsResponse, local_ip: &String) -> Option<T
     }
 }
 
-fn update_target_peer(sink: &ExtEventSink, value: TargetPeer) {
-    sink.submit_command(TARGET_PEER_ADD_VAL_FN, value, Target::Auto)
-        .expect("command failed to submit");
+fn update_target_peer(sink: Sender<AutodiscoveryEvent>, value: TargetPeer) {
+	let _ = sink.send(AutodiscoveryEvent::TargetPeerAdd(value));
 }
 
-fn remove_target_peer(sink: &ExtEventSink, value: TargetPeer) {
-    sink.submit_command(TARGET_PEER_REMOVE_VAL_FN, value, Target::Auto)
-        .expect("command failed to submit");
+fn remove_target_peer(sink: Sender<AutodiscoveryEvent>, value: TargetPeer) {
+	let _ = sink.send(AutodiscoveryEvent::TargerPeerRemove(value));
 }

@@ -1,30 +1,34 @@
 use std::fs::{self, File};
 use std::io::{Read, Write, Cursor};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Instant;
 
 use clipboard::ClipboardContext;
 use clipboard::ClipboardProvider;
 
-use druid::{ExtEventSink, Selector, Target};
+use log::{error, info};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::watch::Receiver;
 use serde::{Deserialize, Serialize};
 use rmp_serde::{Deserializer, Serializer};
+use tokio::runtime::Runtime;
 use walkdir::WalkDir;
 
-use crate::AppState;
-
-pub(crate) const PROGRESSBAR_VAL_FN: Selector<f64> = Selector::new("progressbar_val_fn");
-pub(crate) const PROGRESSBAR_SEND_DTR_VAL_FN: Selector<u32> = Selector::new("progressbar_send_dtr_val_fn");
-pub(crate) const PROGRESSBAR_RCVD_DTR_VAL_FN: Selector<u32> = Selector::new("progressbar_rcvd_dtr_val_fn");
-pub(crate) const TRANSMITTITNG_FILENAME_VAL_FN: Selector<String> = Selector::new("transmitting_filename_val_fn");
 const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 const UPDATE_DTR_PERIOD_MS: u128 = 1000;
 const TRANSMITTING_BUF_SIZE: usize = 1024;
+
+#[derive(Debug)]
+pub enum NetworkEvent {
+    TransmittingFileName(String),
+    TransmittingProgress(f64),
+    SendDataRate(u32),
+    RcvDataRate(u32),
+}
 
 pub enum DataType {
     File,
@@ -66,14 +70,14 @@ pub struct TextMeta {
 
 pub struct DataReceiver {
     download_dir: String,
-    sink: ExtEventSink,
+    sender: Arc<SyncSender<NetworkEvent>>,
     socket: TcpStream,
 }
 
 impl DataReceiver {
-    pub fn new(download_dir_rcvr: Arc<Receiver<String>>, sink: ExtEventSink, socket: TcpStream) -> DataReceiver {
+    pub fn new(download_dir_rcvr: Arc<tokio::sync::watch::Receiver<String>>, sink: Arc<SyncSender<NetworkEvent>>, socket: TcpStream) -> DataReceiver {
         let download_dir = download_dir_rcvr.borrow().clone();
-        DataReceiver { download_dir, sink, socket }
+        DataReceiver { download_dir, sender: sink, socket }
     }
 
     pub async fn process_incoming(&mut self) -> io::Result<()> {
@@ -85,7 +89,7 @@ impl DataReceiver {
     pub async fn handle_msg_pack(&mut self) -> io::Result<()> {
         let msg_size = self.socket.read_u64().await?;
         let msg_type = self.socket.read_u8().await?;
-        println!("msg_size: {}, msg_type: {}", msg_size, msg_type);
+        info!("msg_size: {}, msg_type: {}", msg_size, msg_type);
     
         match DataType::from_u8(msg_type) {
             Some(DataType::File) => {
@@ -98,7 +102,7 @@ impl DataReceiver {
                 self.handle_text_buf(msg_size).await?;
             }
             None => {
-                eprintln!("< DataType is None");
+                error!("< DataType is None");
             }
         }
         Ok(())
@@ -112,22 +116,18 @@ impl DataReceiver {
         let mut de = Deserializer::new(cur);
         let msg_file: FileMeta = Deserialize::deserialize(&mut de).unwrap();
 
-        println!("< Decoded {:?}", &msg_file);
+        info!("< Decoded {:?}", &msg_file);
     
         let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
     
-        println!(
+        info!(
             "< Receiving file: {:?} ({} bytes)",
             relative_path, msg_file.file_size
         );
-        self.sink.submit_command(
-            TRANSMITTITNG_FILENAME_VAL_FN,
-            Box::new(String::from(relative_path.to_str().unwrap())),
-            Target::Auto,
-        )
-        .expect("command failed to submit");
+
+        let _ = self.sender.send(NetworkEvent::TransmittingFileName(String::from(relative_path.to_str().unwrap())));
     
-        println!("< download_dir: {}", self.download_dir);
+        info!("< download_dir: {}", self.download_dir);
         let mut file = File::create(PathBuf::new().join(PathBuf::from(&self.download_dir)).join(relative_path)).unwrap();
         let mut total_received: u64 = 0;
         let mut buf = [0u8; TRANSMITTING_BUF_SIZE];
@@ -140,18 +140,18 @@ impl DataReceiver {
             let mut buf = vec![0u8; file_size as usize];
             let read_bytes = self.socket.read_exact(&mut buf).await?;
             if read_bytes == 0 {
-                eprintln!("< Can't read data");
+                error!("< Can't read data");
             }
             total_received += read_bytes as u64;
             file.write_all(&buf).unwrap();
     
-            update_progress_incoming(&self.sink, 1.0);
+            update_progress_incoming(&self.sender, 1.0);
         } else {
             let mut counter: u32 = 0;
             while total_received < file_size {
                 let read_bytes = self.socket.read_exact(&mut buf).await?;
                 if read_bytes == 0 {
-                    eprintln!("< Can't read data");
+                    error!("< Can't read data");
                     break;
                 }
                 total_received += read_bytes as u64;
@@ -165,7 +165,7 @@ impl DataReceiver {
                     file.write_all(&buf).unwrap();
                     total_received += n as u64;
     
-                    update_progress_incoming(&self.sink, 1.0);
+                    update_progress_incoming(&self.sender, 1.0);
                     break;
                 }
     
@@ -173,20 +173,20 @@ impl DataReceiver {
                 let percentage = total_received as f64 / file_size as f64;
 
                 if counter % 100 == 0 && last_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
-                    update_progress_incoming(&self.sink, percentage);
+                    update_progress_incoming(&self.sender, percentage);
                     counter = 0;
                     last_update = Instant::now();
                 }
 
                 if last_dtr_update.elapsed().as_millis() >= UPDATE_DTR_PERIOD_MS {
-                    update_rcvd_dtr(&self.sink, rcvd_bytes_per_second);
+                    update_rcvd_dtr(&self.sender, rcvd_bytes_per_second);
                     rcvd_bytes_per_second = 0;
                     last_dtr_update = Instant::now();
                 }
             }
-            update_progress_incoming(&self.sink, 1.0);
+            update_progress_incoming(&self.sender, 1.0);
         }
-        println!("< Received {} bytes", total_received);
+        info!("< Received {} bytes", total_received);
     
         Ok(())
     }
@@ -197,12 +197,12 @@ impl DataReceiver {
         let cur = Cursor::new(&buf[..]);
         let mut de = Deserializer::new(cur);
         let msg_file: FileMeta = Deserialize::deserialize(&mut de).unwrap();
-        println!("< Decoded {:?}", &msg_file);
+        info!("< Decoded {:?}", &msg_file);
     
         let relative_path: PathBuf = msg_file.file_relative_path.iter().collect();
     
-        println!("< Received dir: {:?}", relative_path);
-        println!("< download_dir: {}", &self.download_dir);
+        info!("< Received dir: {:?}", relative_path);
+        info!("< download_dir: {}", &self.download_dir);
         fs::create_dir_all(PathBuf::from(&self.download_dir).join(relative_path).as_path()).unwrap();
     
         Ok(())
@@ -215,12 +215,12 @@ impl DataReceiver {
         let mut de = Deserializer::new(cur);
         let msg_text: TextMeta = Deserialize::deserialize(&mut de).unwrap();
 
-        println!("< Received text_buf: {:?}", msg_text.data);
+        info!("< Received text_buf: {:?}", msg_text.data);
     
         let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
         match ctx.set_contents(msg_text.data) {
             Ok(_) => {},
-            Err(e) => eprintln!("Error while setting clipboard content: {}", e),
+            Err(e) => error!("Error while setting clipboard content: {}", e),
         }
     
         Ok(())
@@ -231,32 +231,29 @@ impl DataReceiver {
 //////// Sending part
 
 // For transmit pausing purpose
-pub(crate) fn switch_transfer_state(download_dir: &mut AppState, val: bool) {
-    let mut outgoing_flag = download_dir.outgoing_file_processing.lock().unwrap();
-    *outgoing_flag = val;
+pub(crate) fn switch_transfer_state(state: &AtomicBool, val: bool) {
+    state.store(val, std::sync::atomic::Ordering::Relaxed)
 }
 
-pub(crate) fn send_clipboard(download_dir: &mut AppState) {
+pub(crate) fn send_clipboard(rt: Arc<Runtime>, host: String, port: String) {
     let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
     match ctx.get_contents() {
         Ok(content) => {
-            println!("> Clipboard content: {}", content);
-            let host = download_dir.host.clone();
-            let port = download_dir.port.clone();
-            let rt = download_dir.rt.clone();
+            info!("> Clipboard content: {}", content);
+            let rt = rt.clone();
 
             thread::spawn(move || {
                 rt.block_on(async move {
                     match send_clipboard_inner(content, host, port).await {
                         Ok(_) => {},
-                        Err(e) => eprintln!("Error while sending clipboard: {}", e),
+                        Err(e) => error!("Error while sending clipboard: {}", e),
                     }
-                    println!("> Clipboard sender thread has died");
+                    info!("> Clipboard sender thread has died");
                 });
             });
         }
         Err(e) => {
-            eprintln!("Error while getting clipboard content: {}", e)
+            error!("Error while getting clipboard content: {}", e)
         }
     }
 }
@@ -280,37 +277,33 @@ async fn send_clipboard_inner(
             stream.write_u8(DataType::TextBuffer.to_u8()).await?;
             let bytes = stream.write(&buf).await?;
             if bytes < buf.len() {
-                eprintln!("Bytes written is less than buffer len")
+                error!("Bytes written is less than buffer len")
             }
         },
-        Err(e) => eprintln!("Error while serializing clipboard content: {}", e),
+        Err(e) => error!("Error while serializing clipboard content: {}", e),
     }
 
     Ok(())
 }
 
-pub(crate) fn send(download_dir: &mut AppState, sink: ExtEventSink) {
-    switch_transfer_state(download_dir, true);
-    let path = download_dir.file_name.clone();
-    let host = download_dir.host.clone();
-    let port = download_dir.port.clone();
+pub(crate) fn send(rt: Arc<Runtime>, path: String, host: String, port: String, pause_state: Arc<AtomicBool>, sink: Arc<SyncSender<NetworkEvent>>) {
+    switch_transfer_state(pause_state.clone().as_ref(), true);
 
-    let rt = download_dir.rt.clone();
-    let mut download_dir = download_dir.clone();
+    let rt = rt.clone();
     thread::spawn(move || {
         rt.block_on(async move {
-            send_file(&mut download_dir, path, host, port, sink).await;
-            println!("> Sender thread has died");
+            send_file(path, host, port, pause_state.clone().as_ref(), &sink.clone()).await;
+            info!("> Sender thread has died");
         });
     });
 }
 
 async fn send_file(
-    download_dir: &mut AppState,
     path: String,
     host: String,
     port: String,
-    sink: ExtEventSink,
+    pause_state: &AtomicBool,
+    sender: &SyncSender<NetworkEvent>,
 ) {
     let path = Path::new(path.as_str());
 
@@ -324,45 +317,45 @@ async fn send_file(
             let entry = entry.unwrap();
             let entry_path: &Path = entry.path().strip_prefix(path_parent).unwrap();
             if entry.path().is_dir() {
-                println!(
+                info!(
                     "> Sending dir: entry_path: {}",
                     entry_path.to_str().unwrap()
                 );
-                match send_single_dir(&mut stream, entry_path.to_path_buf(), sink.clone()).await {
+                match send_single_dir(&mut stream, entry_path.to_path_buf(), sender).await {
                     Ok(_) => {}
-                    Err(e) => eprintln!("Error while sending dir: {}", e),
+                    Err(e) => error!("Error while sending dir: {}", e),
                 }
             } else {
                 let entry_full_path = entry.path().to_str().unwrap();
-                let mut full_path = PathBuf::from(path.clone());
+                let mut full_path = PathBuf::from(path);
                 full_path.push(entry.path().file_name().unwrap().to_str().unwrap());
                 match send_single_file(
-                    download_dir,
                     &mut stream,
                     entry_full_path,
                     entry_path.to_path_buf(),
-                    sink.clone(),
+                    &pause_state,
+                    sender,
                 )
                 .await
                 {
                     Ok(_) => {}
-                    Err(e) => eprintln!("Error while sending file: {}", e),
+                    Err(e) => error!("Error while sending file: {}", e),
                 }
             }
         }
     } else {
         let entry_path = path.strip_prefix(path_parent).unwrap();
         match send_single_file(
-            download_dir,
             &mut stream,
             path.to_str().unwrap(),
             entry_path.to_path_buf(),
-            sink,
+            pause_state,
+            sender,
         )
         .await
         {
             Ok(_) => {}
-            Err(e) => eprintln!("Error while sending single file: {}", e),
+            Err(e) => error!("Error while sending single file: {}", e),
         }
     }
 }
@@ -370,9 +363,9 @@ async fn send_file(
 async fn send_single_dir(
     stream: &mut TcpStream,
     dir_path_buf: PathBuf,
-    sink: ExtEventSink,
+    sender: &SyncSender<NetworkEvent>,
 ) -> io::Result<()> {
-    update_progress_incoming(&sink, 0.0);
+    update_progress_incoming(sender, 0.0);
     let data = FileMeta {
         file_relative_path: path_to_vec(dir_path_buf),
         file_size: 0,
@@ -385,35 +378,30 @@ async fn send_single_dir(
             stream.write_u8(DataType::Directory.to_u8()).await?;
             let bytes = stream.write(&buf).await?;
             if bytes < buf.len() {
-                eprintln!("Bytes written is less than buffer len")
+                error!("Bytes written is less than buffer len")
             }
-            update_progress_incoming(&sink, 1.0);
+            update_progress_incoming(sender, 1.0);
         },
-        Err(e) => eprintln!("Error while serializing dir: {}", e),
+        Err(e) => error!("Error while serializing dir: {}", e),
     }
 
     Ok(())
 }
 
 async fn send_single_file(
-    download_dir: &mut AppState,
     stream: &mut TcpStream,
     file_name: &str,
     relative_path: PathBuf,
-    sink: ExtEventSink,
+    pause_state: &AtomicBool,
+    sender: &SyncSender<NetworkEvent>,
 ) -> io::Result<()> {
-    println!(
+    info!(
         "> Sending file: {}, relative_path: {:?}",
         file_name, relative_path
     );
 
-    update_progress_incoming(&sink, 0.0);
-    sink.submit_command(
-        TRANSMITTITNG_FILENAME_VAL_FN,
-        file_name.to_string(),
-        Target::Auto,
-    )
-    .expect("command failed to submit");
+    update_progress_incoming(sender, 0.0);
+    let _ = sender.send(NetworkEvent::TransmittingFileName(String::from(file_name.to_string())));
 
     let mut file = File::open(file_name).unwrap();
     let file_size = file.metadata().unwrap().len();
@@ -430,14 +418,14 @@ async fn send_single_file(
             stream.write_u8(DataType::File.to_u8()).await?;
             let bytes = stream.write(&buf).await?;
             if bytes < buf.len() {
-                eprintln!("Bytes written is less than buffer len")
+                error!("Bytes written is less than buffer len")
             }
-            update_progress_incoming(&sink, 1.0);
+            update_progress_incoming(sender, 1.0);
         },
-        Err(e) => eprintln!("Error while serializing file: {}", e),
+        Err(e) => error!("Error while serializing file: {}", e),
     }
 
-    println!("Packed msg size: {}", buf.len());
+    info!("Packed msg size: {}", buf.len());
 
     let mut buf = [0; TRANSMITTING_BUF_SIZE];
     let mut total_sent: u64 = 0;
@@ -448,14 +436,13 @@ async fn send_single_file(
 
     while let Ok(n) = file.read(&mut buf) {
         if iter_counter % 100 == 0 {
-            let outgoing_flag = download_dir.outgoing_file_processing.lock().unwrap();
-            if !*outgoing_flag {
+            if pause_state.load(Ordering::Relaxed) {
                 break;
             }
     
             if last_progress_update.elapsed().as_millis() > UPDATE_PROGRESS_PERIOD_MS {
                 let percentage = total_sent as f64 / file_size as f64;
-                update_progress_incoming(&sink, percentage);
+                update_progress_incoming(sender, percentage);
                 last_progress_update = Instant::now();
                 iter_counter = 0;
             }
@@ -467,7 +454,7 @@ async fn send_single_file(
         match stream.write_all(&buf[0..n]).await {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("> Error while writing buf into stream: {}", e);
+                error!("> Error while writing buf into stream: {}", e);
                 break;
             }
         }
@@ -476,30 +463,27 @@ async fn send_single_file(
         sent_bytes_per_second += n as u32;
 
         if last_dtr_update.elapsed().as_millis() >= UPDATE_DTR_PERIOD_MS {
-            update_send_dtr(&sink, sent_bytes_per_second);
+            update_send_dtr(sender, sent_bytes_per_second);
             last_dtr_update = Instant::now();
             sent_bytes_per_second = 0;
         }
     }
-    update_progress_incoming(&sink, 1.0);
-    update_send_dtr(&sink, 0);
+    update_progress_incoming(sender, 1.0);
+    update_send_dtr(sender, 0);
 
     Ok(())
 }
 
-fn update_progress_incoming(sink: &ExtEventSink, value: f64) {
-    sink.submit_command(PROGRESSBAR_VAL_FN, value, Target::Auto)
-        .expect("command failed to submit");
+fn update_progress_incoming(sender: &SyncSender<NetworkEvent>, value: f64) {
+    let _ = sender.send(NetworkEvent::TransmittingProgress(value));
 }
 
-fn update_rcvd_dtr(sink: &ExtEventSink, value: u32) {
-    sink.submit_command(PROGRESSBAR_RCVD_DTR_VAL_FN, value, Target::Auto)
-        .expect("command failed to submit");
+fn update_rcvd_dtr(sender: &SyncSender<NetworkEvent>, value: u32) {
+    let _ = sender.send(NetworkEvent::RcvDataRate(value));
 }
 
-fn update_send_dtr(sink: &ExtEventSink, value: u32) {
-    sink.submit_command(PROGRESSBAR_SEND_DTR_VAL_FN, value, Target::Auto)
-        .expect("command failed to submit");
+fn update_send_dtr(sender: &SyncSender<NetworkEvent>, value: u32) {
+    let _ = sender.send(NetworkEvent::SendDataRate(value));
 }
 
 fn path_to_vec(path: PathBuf) -> Vec<String> {
@@ -520,7 +504,6 @@ mod test {
         let tmp_file = File::create(file_name);
         assert_eq!(tmp_file.is_err(), false);
         fs::remove_file(file_name);
-        // TODO complete test
     }
 
 }
