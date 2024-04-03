@@ -364,8 +364,8 @@ async fn send_file(
             Ok(_) => {}
             Err(e) => error!("Error while sending single file: {}", e),
         }
-        send_end_of_transmission(&mut stream).await;
     }
+    send_end_of_transmission(&mut stream).await;
 }
 
 async fn send_end_of_transmission(stream: &mut TcpStream) {
