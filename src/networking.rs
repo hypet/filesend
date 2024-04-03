@@ -36,6 +36,7 @@ pub enum DataType {
     File,
     Directory,
     TextBuffer,
+    EndOfTransmission,
 }
 
 impl DataType {
@@ -44,6 +45,7 @@ impl DataType {
             DataType::File => 0,
             DataType::Directory => 1,
             DataType::TextBuffer => 2,
+            DataType::EndOfTransmission => 3,
         }
     }
 
@@ -52,6 +54,7 @@ impl DataType {
             0 => Some(DataType::File),
             1 => Some(DataType::Directory),
             2 => Some(DataType::TextBuffer),
+            3 => Some(DataType::EndOfTransmission),
             _ => None,
         }
     }
@@ -89,6 +92,7 @@ impl DataReceiver {
     }
 
     pub async fn handle_msg_pack(&mut self) -> io::Result<()> {
+        self.socket.readable().await?;
         let msg_size = self.socket.read_u64().await?;
         let msg_type = DataType::from_u8(self.socket.read_u8().await?);
         info!("msg_size: {}, msg_type: {:?}", msg_size, msg_type);
@@ -102,6 +106,9 @@ impl DataReceiver {
             }
             Some(DataType::TextBuffer) => {
                 self.handle_text_buf(msg_size).await?;
+            }
+            Some(DataType::EndOfTransmission) => {
+                info!("Transmission complete");
             }
             None => {
                 error!("< DataType is None");
@@ -289,7 +296,7 @@ async fn send_clipboard_inner(
 }
 
 pub(crate) fn send(rt: Arc<Runtime>, path: String, host: String, port: String, pause_state: Arc<AtomicBool>, sink: Arc<SyncSender<NetworkEvent>>) {
-    switch_transfer_state(pause_state.clone().as_ref(), true);
+    switch_transfer_state(pause_state.clone().as_ref(), false);
 
     let rt = rt.clone();
     thread::spawn(move || {
@@ -324,7 +331,7 @@ async fn send_file(
                     entry_path.to_str().unwrap()
                 );
                 match send_single_dir(&mut stream, entry_path.to_path_buf(), sender).await {
-                    Ok(_) => {}
+                    Ok(_) => info!("Directory sent"),
                     Err(e) => error!("Error while sending dir: {}", e),
                 }
             } else {
@@ -340,7 +347,7 @@ async fn send_file(
                 )
                 .await
                 {
-                    Ok(_) => {}
+                    Ok(_) => info!("File completely sent"),
                     Err(e) => error!("Error while sending file: {}", e),
                 }
             }
@@ -353,13 +360,21 @@ async fn send_file(
             entry_path.to_path_buf(),
             pause_state,
             sender,
-        )
-        .await
-        {
+        ).await {
             Ok(_) => {}
             Err(e) => error!("Error while sending single file: {}", e),
         }
+        send_end_of_transmission(&mut stream).await;
     }
+}
+
+async fn send_end_of_transmission(stream: &mut TcpStream) {
+    let mut buf = [0; 9];
+    buf[8] = DataType::EndOfTransmission.to_u8();
+    match stream.write_all(&buf).await {
+        Ok(_) => info!("EndOfTransmission has been sent"),
+        Err(e) => error!("Error while sending EndOfTransmission: {}", e),
+    };
 }
 
 async fn send_single_dir(
