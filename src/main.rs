@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tray_item::{IconSource, TrayItem};
 
-use druid::widget::{Button, Container, Flex, Label, List, ProgressBar, Scroll, TextBox, LineBreaking};
+use druid::widget::{Button, Container, Flex, Label, LineBreaking, List, ProgressBar, Scroll, TextBox};
 use druid::{
     AppDelegate, AppLauncher, Command, Data, DelegateCtx, Env, EventCtx, ExtEventSink,
     FileDialogOptions, FileInfo, Handled, Lens, LensExt, Selector, Target, UnitPoint, Widget,
@@ -84,8 +84,8 @@ impl hash::Hash for TargetPeerUi {
 #[derive(Debug, Clone, Data, Lens)]
 struct AppState {
     file_name: String,
-    host: String,
-    port: String,
+    target_host: String,
+    target_port: String,
     progress: f64,
     send_dtr: String, // Data Transfer Rate for sending
     rcv_dtr: String, // Data Transfer Rate for receiving
@@ -108,8 +108,8 @@ impl AppState {
         let (download_dir_tx, download_dir_rx) = watch::channel(download_dir.clone());
         AppState {
             file_name: "".into(),
-            host: "".into(),
-            port: "".into(),
+            target_host: "".into(),
+            target_port: "".into(),
             progress: 0.0,
             send_dtr: "".into(),
             rcv_dtr: "".into(),
@@ -155,8 +155,8 @@ impl AppDelegate<AppState> for Delegate {
             app_state.target_list.remove(address);
             return Handled::Yes;
         } else if let Some(address) = cmd.get(SET_CURRENT_PEER) {
-            app_state.host = address.ip.clone();
-            app_state.port = address.port.to_string();
+            app_state.target_host = address.ip.clone();
+            app_state.target_port = address.port.to_string();
             return Handled::Yes;
         } else if let Some(number) = cmd.get(PROGRESSBAR_VAL_FN) {
             app_state.progress = *number;
@@ -240,13 +240,13 @@ fn build_gui() -> impl Widget<AppState> {
         .with_placeholder("Host")
         .with_text_size(GUI_TEXT_SIZE)
         .align_left()
-        .lens(AppState::host);
+        .lens(AppState::target_host);
 
     let port_textbox = TextBox::new()
         .with_placeholder("Port")
         .with_text_size(GUI_TEXT_SIZE)
         .align_left()
-        .lens(AppState::port);
+        .lens(AppState::target_port);
     let address_row = Flex::row()
         .with_child(host_textbox)
         .with_spacer(10.0)
@@ -254,16 +254,16 @@ fn build_gui() -> impl Widget<AppState> {
 
     // Send buttons
     let send_clipboard_button = Button::new("Send Clipboard")
-        .on_click(|_, data: &mut AppState, _| send_clipboard(data.rt.clone(), data.host.clone(), data.port.to_string()))
-        .disabled_if(|data: &AppState, _| data.host.is_empty() || data.port.is_empty())
+        .on_click(|_, data: &mut AppState, _| send_clipboard(data.rt.clone(), data.target_host.clone(), data.target_port.clone()))
+        .disabled_if(|data: &AppState, _| data.target_host.is_empty() || data.target_port.is_empty())
         .fix_height(30.0);
     let send_button = Button::new("Send")
         .on_click(|_ctx, data: &mut AppState, _| 
             send(
                 data.rt.clone(), 
               data.file_name.clone(), 
-              data.host.clone(), 
-              data.port.to_string(), 
+              data.target_host.clone(), 
+              data.target_port.to_string(), 
               data.file_transfer_pause_state.clone(),
               data.networking_sender.clone().unwrap()
             )
@@ -271,8 +271,8 @@ fn build_gui() -> impl Widget<AppState> {
         .disabled_if(|data: &AppState, _| {
             data.file_name.is_empty()
                 || (data.progress > 0.00 && data.progress < 1.0)
-                || data.host.is_empty()
-                || data.port.is_empty()
+                || data.target_host.is_empty()
+                || data.target_port.is_empty()
         })
         .fix_height(30.0);
     let stop_button = Button::new("Stop")
@@ -280,8 +280,8 @@ fn build_gui() -> impl Widget<AppState> {
         .disabled_if(|data: &AppState, _| {
             data.file_name.is_empty()
                 || (data.progress == 0.00 || data.progress == 1.0)
-                || data.host.is_empty()
-                || data.port.is_empty()
+                || data.target_host.is_empty()
+                || data.target_port.is_empty()
         })
         .fix_height(30.0);
     let buttons_row = Flex::row()

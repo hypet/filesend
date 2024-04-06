@@ -23,6 +23,8 @@ const UPDATE_PROGRESS_PERIOD_MS: u128 = 50;
 const UPDATE_DTR_PERIOD_MS: u128 = 1000;
 const TRANSMITTING_BUF_SIZE: usize = 1024;
 
+type NetBroadcaster = SyncSender<NetworkEvent>;
+
 #[derive(Debug)]
 pub enum NetworkEvent {
     TransmittingFileName(String),
@@ -75,12 +77,12 @@ pub struct TextMeta {
 
 pub struct DataReceiver {
     download_dir: String,
-    sender: Arc<SyncSender<NetworkEvent>>,
+    sender: Arc<NetBroadcaster>,
     socket: TcpStream,
 }
 
 impl DataReceiver {
-    pub fn new(download_dir_rcvr: Arc<watch::Receiver<String>>, sink: Arc<SyncSender<NetworkEvent>>, socket: TcpStream) -> DataReceiver {
+    pub fn new(download_dir_rcvr: Arc<watch::Receiver<String>>, sink: Arc<NetBroadcaster>, socket: TcpStream) -> DataReceiver {
         let download_dir = download_dir_rcvr.borrow().clone();
         DataReceiver { download_dir, sender: sink, socket }
     }
@@ -134,7 +136,7 @@ impl DataReceiver {
             relative_path, msg_file.file_size
         );
 
-        let _ = self.sender.send(NetworkEvent::TransmittingFileName(String::from(relative_path.to_str().unwrap())));
+        update_transmitting_filename(self.sender.as_ref(), relative_path.to_str().unwrap());
     
         info!("< download_dir: {}", self.download_dir);
         let mut file = File::create(PathBuf::new().join(PathBuf::from(&self.download_dir)).join(relative_path)).unwrap();
@@ -253,7 +255,7 @@ pub(crate) fn send_clipboard(rt: Arc<Runtime>, host: String, port: String) {
 
             thread::spawn(move || {
                 rt.block_on(async move {
-                    match send_clipboard_inner(content, host, port).await {
+                    match send_clipboard_inner(content.as_str(), host.to_owned(), port).await {
                         Ok(_) => {},
                         Err(e) => error!("Error while sending clipboard: {}", e),
                     }
@@ -268,7 +270,7 @@ pub(crate) fn send_clipboard(rt: Arc<Runtime>, host: String, port: String) {
 }
 
 async fn send_clipboard_inner(
-    content: String,
+    content: &str,
     host: String,
     port: String,
 ) -> io::Result<()> {
@@ -277,7 +279,7 @@ async fn send_clipboard_inner(
         .unwrap();
 
     let data = TextMeta {
-        data: content
+        data: content.to_string()
     };
     let mut buf = Vec::new();
     match data.serialize(&mut Serializer::new(&mut buf)) {
@@ -295,7 +297,7 @@ async fn send_clipboard_inner(
     Ok(())
 }
 
-pub(crate) fn send(rt: Arc<Runtime>, path: String, host: String, port: String, pause_state: Arc<AtomicBool>, sink: Arc<SyncSender<NetworkEvent>>) {
+pub(crate) fn send(rt: Arc<Runtime>, path: String, host: String, port: String, pause_state: Arc<AtomicBool>, sink: Arc<NetBroadcaster>) {
     switch_transfer_state(pause_state.clone().as_ref(), false);
 
     let rt = rt.clone();
@@ -312,7 +314,7 @@ async fn send_file(
     host: String,
     port: String,
     pause_state: &AtomicBool,
-    sender: &SyncSender<NetworkEvent>,
+    sender: &NetBroadcaster,
 ) {
     let path = Path::new(path.as_str());
 
@@ -380,7 +382,7 @@ async fn send_end_of_transmission(stream: &mut TcpStream) {
 async fn send_single_dir(
     stream: &mut TcpStream,
     dir_path_buf: PathBuf,
-    sender: &SyncSender<NetworkEvent>,
+    sender: &NetBroadcaster,
 ) -> io::Result<()> {
     update_progress_incoming(sender, 0.0);
     let data = FileMeta {
@@ -395,7 +397,7 @@ async fn send_single_dir(
             stream.write_u8(DataType::Directory.to_u8()).await?;
             let bytes = stream.write(&buf).await?;
             if bytes < buf.len() {
-                error!("Bytes written is less than buffer len")
+                error!("Bytes written is less than buffer length")
             }
             update_progress_incoming(sender, 1.0);
         },
@@ -410,7 +412,7 @@ async fn send_single_file(
     file_name: &str,
     relative_path: PathBuf,
     pause_state: &AtomicBool,
-    sender: &SyncSender<NetworkEvent>,
+    sender: &NetBroadcaster,
 ) -> io::Result<()> {
     info!(
         "> Sending file: {}, relative_path: {:?}",
@@ -418,7 +420,7 @@ async fn send_single_file(
     );
 
     update_progress_incoming(sender, 0.0);
-    let _ = sender.send(NetworkEvent::TransmittingFileName(String::from(file_name.to_string())));
+    update_transmitting_filename(sender, file_name);
 
     let mut file = File::open(file_name).unwrap();
     let file_size = file.metadata().unwrap().len();
@@ -431,8 +433,11 @@ async fn send_single_file(
     let mut buf = Vec::new();
     match data.serialize(&mut Serializer::new(&mut buf)) {
         Ok(_) => {
-            stream.write_u64(buf.len() as u64).await?;
-            stream.write_u8(DataType::File.to_u8()).await?;
+            let mut header_buf: Vec<u8> = Vec::with_capacity(9);
+            header_buf.write_u64(buf.len() as u64).await?;
+            header_buf.write_u8(DataType::File.to_u8()).await?;
+
+            stream.write_all(&header_buf).await?;
             let bytes = stream.write(&buf).await?;
             if bytes < buf.len() {
                 error!("Bytes written is less than buffer len")
@@ -491,15 +496,19 @@ async fn send_single_file(
     Ok(())
 }
 
-fn update_progress_incoming(sender: &SyncSender<NetworkEvent>, value: f64) {
+fn update_transmitting_filename(sender: &NetBroadcaster, file_name: &str) {
+    let _ = sender.send(NetworkEvent::TransmittingFileName(String::from(file_name.to_string())));
+}
+
+fn update_progress_incoming(sender: &NetBroadcaster, value: f64) {
     let _ = sender.send(NetworkEvent::TransmittingProgress(value));
 }
 
-fn update_rcvd_dtr(sender: &SyncSender<NetworkEvent>, value: u32) {
+fn update_rcvd_dtr(sender: &NetBroadcaster, value: u32) {
     let _ = sender.send(NetworkEvent::RcvDataRate(value));
 }
 
-fn update_send_dtr(sender: &SyncSender<NetworkEvent>, value: u32) {
+fn update_send_dtr(sender: &NetBroadcaster, value: u32) {
     let _ = sender.send(NetworkEvent::SendDataRate(value));
 }
 
