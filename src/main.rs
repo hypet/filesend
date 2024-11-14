@@ -8,7 +8,7 @@ Application has functionality to choose a file and send it over network to anoth
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::{cmp, env, fs, hash, thread};
+use std::{cmp, env, fs, hash, io, thread};
 use druid::im::{HashSet, Vector};
 use druid::lens::Identity;
 use home::home_dir;
@@ -369,7 +369,7 @@ fn build_target_peer_item() -> impl Widget<TargetPeerUi> {
 }
 
 fn main() {
-    simple_logger::init_with_level(log::Level::Info).unwrap();
+    simple_logging::log_to(io::stdout(), log::LevelFilter::Info);
 
     let args: Vec<String> = env::args().collect();
 

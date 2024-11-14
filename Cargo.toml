@@ -12,21 +12,21 @@ opt-level = 3
 # codegen-units = 1
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.41.1", features = ["full"] }
 druid = { version = "0.8.3", features=["im"] }
-tray-item = "0.8.0"
-walkdir = "2"
+tray-item = "0.10.0"
+walkdir = "2.5.0"
 serde = { version = "1.0", features = ["derive"] }
-rmp = "0.8.12"
-rmp-serde = "1.1.2"
-searchlight = "0.3.1"
-hostname = "0.3.1"
-local-ip-address = "0.5.2"
-human_bytes = "0.4.2"
+rmp = "0.8.14"
+rmp-serde = "1.3.0"
+searchlight = "0.3.2"
+hostname = "0.4.0"
+local-ip-address = "0.6.3"
+human_bytes = "0.4.3"
 clipboard = "0.5.0"
-home = "0.5.5"
-log = "0.4.21"
-simple_logger = "4.3.3"
+home = "0.5.9"
+log = "0.4.22"
+simple-logging = "2.0.2"
 
 [build-dependencies]
 windres = "*"
